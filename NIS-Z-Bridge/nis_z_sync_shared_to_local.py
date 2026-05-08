@@ -5,6 +5,7 @@ import shutil
 import signal
 import sys
 import time
+import ctypes
 from pathlib import Path
 from typing import Iterable
 
@@ -24,6 +25,9 @@ LOCAL_STATE_DIR = LOCAL_ROOT / "state"
 LOG_PATH = LOCAL_ROOT / "nis_z_sync.log"
 POLL_INTERVAL_SECONDS = 1.0
 COMMAND_SUFFIX = ".txt"
+NIS_WINDOW_TITLE_CONTAINS = "NIS"
+TRIGGER_NIS_HOTKEY_AFTER_FORWARD = True
+STALE_SLOT_SECONDS = 120.0
 
 COMMAND_SLOT_MAP = {
     "GET_Z": "current_getz",
@@ -41,7 +45,53 @@ RESPONSE_SLOT_MAP = {
     "current_stop_response.txt": "current_stop",
 }
 
+ACTIVE_LOCAL_COMMAND_NAMES = {
+    "current_getz.txt",
+    "current_move_rel_custom.txt",
+    "current_move_abs_4100_4050_7000.txt",
+    "current_move_abs_4200_4000_8100.txt",
+    "current_stop.txt",
+}
+
+EXPECTED_LOCAL_RESPONSE_NAMES = set(RESPONSE_SLOT_MAP)
+
 _STOP_REQUESTED = False
+
+
+def trigger_nis_macro_hotkey() -> bool:
+    """Bring NIS-Elements to the foreground and press F4 once."""
+    user32 = ctypes.windll.user32
+    target_hwnd = ctypes.c_void_p()
+
+    enum_windows_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def callback(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        if NIS_WINDOW_TITLE_CONTAINS.lower() in buffer.value.lower():
+            target_hwnd.value = hwnd
+            return False
+        return True
+
+    user32.EnumWindows(enum_windows_proc(callback), 0)
+    if not target_hwnd.value:
+        logging.warning("Could not find a visible NIS window containing %r; macro hotkey not sent.", NIS_WINDOW_TITLE_CONTAINS)
+        return False
+
+    user32.SetForegroundWindow(target_hwnd)
+    time.sleep(0.2)
+    f4 = 0x73
+    keyeventf_keyup = 0x0002
+    user32.keybd_event(f4, 0, 0, 0)
+    time.sleep(0.05)
+    user32.keybd_event(f4, 0, keyeventf_keyup, 0)
+    logging.info("Sent F4 macro hotkey to NIS window.")
+    return True
 
 
 def configure_logging() -> None:
@@ -100,6 +150,70 @@ def state_file_for_slot(slot_name: str) -> Path:
     return LOCAL_STATE_DIR / f"{slot_name}.id"
 
 
+def age_seconds(path: Path) -> float:
+    return max(0.0, time.time() - path.stat().st_mtime)
+
+
+def archive_local_file(source: Path, archive_root: Path, reason: str) -> Path:
+    archive_name = f"{source.stem}__{reason}{source.suffix}"
+    destination = archive_name_conflict(archive_root / archive_name)
+    source.replace(destination)
+    return destination
+
+
+def recover_stale_local_slots() -> None:
+    for local_command in iter_txt_files(LOCAL_COMMANDS_DIR):
+        if local_command.name not in ACTIVE_LOCAL_COMMAND_NAMES:
+            archived = archive_local_file(local_command, LOCAL_ERRORS_DIR, "unsupported_local_command")
+            logging.warning("Archived unsupported local command %s -> %s", local_command, archived)
+            continue
+
+        if age_seconds(local_command) <= STALE_SLOT_SECONDS:
+            continue
+
+        archived = archive_local_file(local_command, LOCAL_ERRORS_DIR, "stale_local_command")
+        logging.warning("Archived stale local command %s -> %s", local_command, archived)
+
+    for slot_state in sorted(
+        (path for path in LOCAL_STATE_DIR.glob("*.id") if path.is_file()),
+        key=lambda path: (path.stat().st_mtime, path.name),
+    ):
+        slot_name = slot_state.stem
+        local_command = LOCAL_COMMANDS_DIR / f"{slot_name}.txt"
+
+        matching_response = None
+        for response_name, response_slot in RESPONSE_SLOT_MAP.items():
+            if response_slot == slot_name:
+                candidate = LOCAL_RESPONSES_DIR / response_name
+                if candidate.exists():
+                    matching_response = candidate
+                    break
+
+        if local_command.exists() or matching_response is not None:
+            continue
+
+        if age_seconds(slot_state) <= STALE_SLOT_SECONDS:
+            continue
+
+        archived = archive_local_file(slot_state, LOCAL_ERRORS_DIR, "stale_slot_state")
+        logging.warning("Archived stale slot state %s -> %s", slot_state, archived)
+
+    for local_response in iter_txt_files(LOCAL_RESPONSES_DIR):
+        if local_response.name not in EXPECTED_LOCAL_RESPONSE_NAMES:
+            continue
+
+        if age_seconds(local_response) <= STALE_SLOT_SECONDS:
+            continue
+
+        slot_name = RESPONSE_SLOT_MAP[local_response.name]
+        slot_state = state_file_for_slot(slot_name)
+        if slot_state.exists():
+            continue
+
+        archived = archive_local_file(local_response, LOCAL_ERRORS_DIR, "orphan_local_response")
+        logging.warning("Archived orphan local response %s -> %s", local_response, archived)
+
+
 def forward_shared_commands() -> int:
     forwarded = 0
 
@@ -140,6 +254,8 @@ def forward_shared_commands() -> int:
                 slot_name,
                 archived_command,
             )
+            if TRIGGER_NIS_HOTKEY_AFTER_FORWARD:
+                trigger_nis_macro_hotkey()
             forwarded += 1
         except Exception as exc:
             if local_command.exists():
@@ -208,8 +324,10 @@ def main() -> int:
     logging.info("Starting NIS Z fixed-slot shared/local sync bridge.")
     logging.info("Shared root: %s", SHARED_ROOT)
     logging.info("Local root: %s", LOCAL_ROOT)
+    recover_stale_local_slots()
 
     while not _STOP_REQUESTED:
+        recover_stale_local_slots()
         forwarded = forward_shared_commands()
         published = publish_local_responses()
 

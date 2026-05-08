@@ -908,14 +908,6 @@ class NISZBridgeController:
     """Shared-folder client for the stable NIS-Z-Bridge sync workflow."""
 
     DEFAULT_SHARED_ROOT = r"\\sti-nas1.rcp.epfl.ch\bios\bios-raw\backups\visible\cell\Jiayi_bios-raw\Z control shared"
-    SUPPORTED_COMMANDS = {
-        "GET_Z",
-        "MOVE_REL 1.000000",
-        "MOVE_REL -1.000000",
-        "MOVE_ABS 4100.000000 4050.000000 7000.000000",
-        "MOVE_ABS 4200.000000 4000.000000 8100.000000",
-        "STOP",
-    }
 
     def __init__(self, shared_root=None):
         self.shared_root = Path(shared_root or self.DEFAULT_SHARED_ROOT)
@@ -950,13 +942,17 @@ class NISZBridgeController:
                 if len(raw) > 1 and raw[1] == 0:
                     response = raw.decode("utf-16-le", errors="replace").replace("\x00", "").strip()
                 else:
-                    response = raw.decode("ascii", errors="ignore").strip()
+                    response = raw.decode("ascii", errors="replace").replace("\x00", "").strip()
+                try:
+                    response_path.unlink()
+                except OSError:
+                    pass
                 return response
             time.sleep(0.25)
 
         raise RuntimeError(
             f"Timed out waiting for shared response {response_path}. "
-            "On the NIS PC, make sure nis_z_sync_shared_to_local.py is running and run the NIS macro."
+            "On the NIS PC, make sure nis_z_sync_shared_to_local.py is running and that F4 runs the NIS macro."
         )
 
     def _parse_z(self, response):
@@ -971,8 +967,12 @@ class NISZBridgeController:
     def move_rel(self, dz, timeout_sec=90):
         return self._parse_z(self._send_and_wait(f"MOVE_REL {dz:.6f}", timeout_sec))
 
-    def move_abs(self, z, z_min, z_max, timeout_sec=90):
-        return self._parse_z(self._send_and_wait(f"MOVE_ABS {z:.6f} {z_min:.6f} {z_max:.6f}", timeout_sec))
+    def move_abs(self, z, z_min=None, z_max=None, timeout_sec=90):
+        if z_min is None or z_max is None:
+            command = f"MOVE_ABS {z:.6f}"
+        else:
+            command = f"MOVE_ABS {z:.6f} {z_min:.6f} {z_max:.6f}"
+        return self._parse_z(self._send_and_wait(command, timeout_sec))
 
     def stop(self, timeout_sec=30):
         return self._parse_z(self._send_and_wait("STOP", timeout_sec))
@@ -1034,7 +1034,7 @@ class HeraTriggerApp(tk.Tk):
         self.license_var = tk.StringVar(value="Unknown")
         self.selected_device_var = tk.StringVar(value="(none)")
         self.tango_dll_var = tk.StringVar(value=os.path.join(os.path.abspath(os.path.dirname(__file__)), "Tango_DLL.dll"))
-        self.stage_port_var = tk.StringVar(value="COM6")
+        self.stage_port_var = tk.StringVar(value="COM7")
         self.stage_baud_var = tk.IntVar(value=57600)
         self.stage_interface_var = tk.StringVar(value="RS232 / COM")
         self.timelapse_status_var = tk.StringVar(value="Timelapse: idle")
@@ -1080,7 +1080,7 @@ class HeraTriggerApp(tk.Tk):
         self.nis_z_poll_job = None
         self.nis_z_poll_inflight = False
         self.nis_z_request_lock = threading.Lock()
-        self.nis_z_poll_interval_ms = 5000
+        self.nis_z_poll_interval_ms = 30000
         self._configure_theme()
         self._build_ui()
         self.refresh_positions_tree()
@@ -1736,7 +1736,7 @@ class HeraTriggerApp(tk.Tk):
                 except Exception as exc:
                     self._log_async(f"NIS Z GET_Z failed: {exc}")
                     self._set_var_async(self.nis_z_status_var, "NIS Z: GET_Z failed")
-                    self._safe_after(0, lambda: self.nis_z_current_z_var.set("Z: error"))
+                    self._safe_after(0, lambda exc=exc: self._set_nis_z_status(f"GET_Z failed: {exc}"))
         threading.Thread(target=worker, daemon=True).start()
 
     def _nis_z_move_rel(self, dz):
@@ -2378,6 +2378,17 @@ class HeraTriggerApp(tk.Tk):
     def _current_cached_z(self):
         return self.nis_z_last_value if self.nis_z_last_value is not None else math.nan
 
+    def _get_current_z_or_nan(self):
+        """Read NIS Z synchronously for position saving; return NaN if unavailable."""
+        try:
+            with self.nis_z_request_lock:
+                z = self._get_nis_z_controller().get_z(timeout_sec=int(self.nis_z_timeout_var.get()))
+            self._set_nis_z_value(z)
+            return z
+        except Exception as exc:
+            self.log(f"Could not read NIS Z while saving position: {exc}")
+            return math.nan
+
     def _parse_optional_z(self, text):
         text = text.strip()
         return float(text) if text else math.nan
@@ -2389,7 +2400,7 @@ class HeraTriggerApp(tk.Tk):
             x, y, _, _ = self.tango.get_position()
             requested_name = self.position_name_var.get().strip() or f"Site_{len(self.positions) + 1}"
             name = self._unique_position_name(requested_name)
-            z = self._current_cached_z()
+            z = self._get_current_z_or_nan()
             self.positions.append(SavedPosition(name, x, y, z))
             self.selected_position_index = len(self.positions) - 1
             self._populate_selected_position_fields(self.positions[self.selected_position_index])
@@ -2450,7 +2461,7 @@ class HeraTriggerApp(tk.Tk):
             if not self.tango or not self.tango.connected:
                 raise RuntimeError("Connect the stage before capturing current XYZ.")
             x, y, _, _ = self.tango.get_position()
-            z = self._current_cached_z()
+            z = self._get_current_z_or_nan()
             if not self.selected_name_var.get().strip():
                 default_name = f"Site_{len(self.positions) + 1}" if self.selected_position_index is None else self.positions[self.selected_position_index].name
                 self.selected_name_var.set(default_name)
@@ -2501,7 +2512,7 @@ class HeraTriggerApp(tk.Tk):
             x, y, _, _ = self.tango.get_position()
             position.x = x
             position.y = y
-            position.z = self._current_cached_z()
+            position.z = self._get_current_z_or_nan()
             self._populate_selected_position_fields(position)
             self.refresh_positions_tree()
             self.log(f"Updated {position.name} to X={x:.3f}, Y={y:.3f}, Z={self._format_saved_z(position.z) or '-'}.")
@@ -2557,6 +2568,13 @@ class HeraTriggerApp(tk.Tk):
                     self.tango.move_absolute_xy(position.x, position.y)
                     self.tango.wait_for_xy_stop(60000)
                     self._safe_after(0, self.update_stage_position_display)
+                try:
+                    target_z = float(position.z)
+                    if not math.isnan(target_z):
+                        self._log_async(f"NIS Z: targeting {target_z:.3f} um for {position.name}...")
+                        self._move_z_to_position(target_z)
+                except (TypeError, ValueError):
+                    pass
                 self._log_async(f"Reached {position.name}.")
             except Exception as exc:
                 self._log_async(f"Failed to go to selected position: {exc}")
