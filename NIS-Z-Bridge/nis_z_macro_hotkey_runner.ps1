@@ -1,10 +1,18 @@
 param(
     [string]$CommandDir = "E:\Jiayi\NISZBridge\commands",
-    [string]$WindowTitleContains = "NIS",
+    [string]$WindowTitleContains = "NIS-Elements",
     [string]$RunHotkey = "{F4}",
     [string]$StopFile = "E:\Jiayi\NISZBridge\stop_hotkey_runner.txt",
     [int]$PollMilliseconds = 250,
-    [int]$DebounceMilliseconds = 1000
+    [int]$DebounceMilliseconds = 1000,
+    [string[]]$ExcludeTitleContains = @(
+        "Visual Studio Code",
+        "Windows PowerShell",
+        "PowerShell",
+        "Windows Terminal",
+        "Command Prompt",
+        "cmd.exe"
+    )
 )
 
 Add-Type -AssemblyName Microsoft.VisualBasic
@@ -18,12 +26,29 @@ Write-Host "Watching: $CommandDir"
 Write-Host "Stop file: $StopFile"
 
 function Get-NisWindowProcess {
-    Get-Process |
+    $matches = Get-Process |
         Where-Object {
             $_.MainWindowHandle -ne 0 -and
             $_.MainWindowTitle -like "*$WindowTitleContains*"
-        } |
-        Select-Object -First 1
+        }
+
+    $eligible = $matches | Where-Object {
+        $title = $_.MainWindowTitle
+        -not ($ExcludeTitleContains | Where-Object { $title -like "*$_*" })
+    }
+
+    $selected = $eligible | Sort-Object @{
+        Expression = {
+            if ($_.MainWindowTitle -like "*NIS-Elements*") { 0 } else { 1 }
+        }
+    }, MainWindowTitle | Select-Object -First 1
+
+    if (-not $selected -and $matches) {
+        $ignored = ($matches | Select-Object -ExpandProperty MainWindowTitle) -join " | "
+        Write-Host "$(Get-Date -Format s) Ignored matching non-NIS windows: $ignored"
+    }
+
+    return $selected
 }
 
 function Send-NisRunHotkey {
