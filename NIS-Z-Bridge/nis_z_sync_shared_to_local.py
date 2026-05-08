@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import signal
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -26,6 +28,8 @@ LOG_PATH = LOCAL_ROOT / "nis_z_sync.log"
 POLL_INTERVAL_SECONDS = 1.0
 COMMAND_SUFFIX = ".txt"
 STALE_SLOT_SECONDS = 120.0
+SHARED_COMMAND_MAX_AGE_SECONDS = 1800.0
+COMMAND_TIMESTAMP_RE = re.compile(r"(20\d{6}_\d{6})")
 
 COMMAND_SLOT_MAP = {
     "GET_Z": "current_getz",
@@ -54,6 +58,7 @@ ACTIVE_LOCAL_COMMAND_NAMES = {
 EXPECTED_LOCAL_RESPONSE_NAMES = set(RESPONSE_SLOT_MAP)
 
 _STOP_REQUESTED = False
+_LAST_STALE_BACKLOG_LOG_AT = 0.0
 
 
 def configure_logging() -> None:
@@ -95,6 +100,66 @@ def iter_txt_files(folder: Path) -> Iterable[Path]:
         for name in sorted(names)
         if name.lower().endswith(COMMAND_SUFFIX)
     ]
+
+
+def command_timestamp_seconds(path: Path) -> float | None:
+    match = COMMAND_TIMESTAMP_RE.search(path.stem)
+    if not match:
+        return None
+
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d_%H%M%S").timestamp()
+    except ValueError:
+        return None
+
+
+def shared_command_sort_key(path: Path) -> tuple[float, str]:
+    timestamp = command_timestamp_seconds(path)
+    if timestamp is None:
+        return (0.0, path.name)
+    return (timestamp, path.name)
+
+
+def newest_fresh_shared_command() -> Path | None:
+    global _LAST_STALE_BACKLOG_LOG_AT
+
+    commands = list(iter_txt_files(SHARED_COMMANDS_DIR))
+    if not commands:
+        return None
+
+    now = time.time()
+    fresh_commands = []
+    stale_count = 0
+    unknown_timestamp_count = 0
+
+    for command in commands:
+        timestamp = command_timestamp_seconds(command)
+        if timestamp is None:
+            unknown_timestamp_count += 1
+            fresh_commands.append(command)
+            continue
+
+        if now - timestamp > SHARED_COMMAND_MAX_AGE_SECONDS:
+            stale_count += 1
+            continue
+
+        fresh_commands.append(command)
+
+    if stale_count:
+        elapsed = now - _LAST_STALE_BACKLOG_LOG_AT
+        if elapsed > 30.0:
+            logging.info(
+                "Ignoring %d stale shared command file(s); %d fresh file(s), %d without timestamp.",
+                stale_count,
+                len(fresh_commands),
+                unknown_timestamp_count,
+            )
+            _LAST_STALE_BACKLOG_LOG_AT = now
+
+    if not fresh_commands:
+        return None
+
+    return max(fresh_commands, key=shared_command_sort_key)
 
 
 def copy_text_file(source: Path, destination: Path) -> None:
@@ -206,7 +271,11 @@ def recover_stale_local_slots() -> None:
 def forward_shared_commands() -> int:
     forwarded = 0
 
-    for shared_command in iter_txt_files(SHARED_COMMANDS_DIR):
+    shared_command = newest_fresh_shared_command()
+    if shared_command is None:
+        return 0
+
+    for shared_command in [shared_command]:
         archived_command = archive_name_conflict(SHARED_FORWARDED_DIR / shared_command.name)
 
         try:
