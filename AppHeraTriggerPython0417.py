@@ -976,7 +976,7 @@ class NISZBridgeController:
         )
 
     def _parse_z(self, response):
-        match = re.match(r"^OK\s+([-+]?\d+(?:\.\d+)?)\s*$", response)
+        match = re.match(r"^OK\s+([-+]?\d+\.\d+)\s*$", response)
         if match:
             return float(match.group(1))
         if response.startswith("OK"):

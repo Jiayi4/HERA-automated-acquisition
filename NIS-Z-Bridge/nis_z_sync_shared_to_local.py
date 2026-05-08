@@ -30,6 +30,8 @@ COMMAND_SUFFIX = ".txt"
 STALE_SLOT_SECONDS = 120.0
 SHARED_COMMAND_MAX_AGE_SECONDS = 180.0
 COMMAND_TIMESTAMP_RE = re.compile(r"(20\d{6}_\d{6})")
+COMPLETE_OK_RESPONSE_RE = re.compile(r"^OK\s+[-+]?\d+\.\d+\s*$")
+LOCAL_RESPONSE_MIN_AGE_SECONDS = 0.75
 
 COMMAND_SLOT_MAP = {
     "GET_Z": "current_getz",
@@ -172,6 +174,26 @@ def write_text_file(destination: Path, text: str) -> None:
     temp_destination = destination.with_suffix(destination.suffix + ".tmp")
     temp_destination.write_text(text, encoding="ascii", newline="\n")
     temp_destination.replace(destination)
+
+
+def decode_response_bytes(raw: bytes) -> str:
+    if len(raw) > 1 and raw[1] == 0:
+        text = raw.decode("utf-16-le", errors="replace")
+    else:
+        text = raw.decode("ascii", errors="replace")
+    return text.replace("\x00", "").strip()
+
+
+def read_response_text(path: Path) -> str:
+    return decode_response_bytes(path.read_bytes())
+
+
+def is_complete_response(text: str) -> bool:
+    if text.startswith("ERROR "):
+        return True
+    if text.startswith("OK "):
+        return COMPLETE_OK_RESPONSE_RE.match(text) is not None
+    return False
 
 
 def archive_name_conflict(destination: Path) -> Path:
@@ -353,7 +375,15 @@ def publish_local_responses() -> int:
             logging.warning("Ignoring local response without slot state: %s", local_response)
             continue
 
+        if age_seconds(local_response) < LOCAL_RESPONSE_MIN_AGE_SECONDS:
+            continue
+
         try:
+            response_text = read_response_text(local_response)
+            if not is_complete_response(response_text):
+                logging.warning("Waiting for complete local response in %s: %r", local_response, response_text)
+                continue
+
             response_id = slot_state.read_text(encoding="ascii").strip()
             shared_response = SHARED_RESPONSES_DIR / f"{response_id}.txt"
             processed_response = archive_name_conflict(LOCAL_PROCESSED_DIR / f"{response_id}__{local_response.name}")

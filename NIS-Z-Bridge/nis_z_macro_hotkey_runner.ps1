@@ -43,6 +43,26 @@ function Get-ResponsePathForCommand {
     }
 }
 
+function Test-CompleteResponse {
+    param([string]$Path)
+
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+
+    try {
+        $text = (Get-Content -LiteralPath $Path -Raw -ErrorAction Stop).Trim([char]0).Trim()
+    } catch {
+        return $false
+    }
+
+    if ($text -like "ERROR *") {
+        return $true
+    }
+
+    return ($text -match '^OK\s+[-+]?\d+\.\d+\s*$')
+}
+
 function Get-NisWindowProcess {
     $matches = Get-Process |
         Where-Object {
@@ -108,7 +128,7 @@ while ($true) {
         }
 
         $responsePath = Get-ResponsePathForCommand -CommandName $command.Name
-        if ($responsePath -and (Test-Path -LiteralPath $responsePath)) {
+        if (Test-CompleteResponse -Path $responsePath) {
             continue
         }
 
