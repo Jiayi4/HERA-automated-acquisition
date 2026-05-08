@@ -20,10 +20,22 @@ Add-Type -AssemblyName System.Windows.Forms
 
 $seen = @{}
 $lastHotkeyAt = Get-Date "2000-01-01"
+$startedAtUtc = (Get-Date).ToUniversalTime()
 
 Write-Host "Starting macro hotkey runner. WindowTitleContains='$WindowTitleContains' Hotkey='$RunHotkey'"
 Write-Host "Watching: $CommandDir"
 Write-Host "Stop file: $StopFile"
+
+if (Test-Path -LiteralPath $CommandDir) {
+    $existingCommands = Get-ChildItem -LiteralPath $CommandDir -Filter "*.txt" -File -ErrorAction SilentlyContinue
+    foreach ($command in $existingCommands) {
+        $seen[$command.FullName] = $command.LastWriteTimeUtc.Ticks
+    }
+
+    if ($existingCommands.Count -gt 0) {
+        Write-Host "$(Get-Date -Format s) Ignoring $($existingCommands.Count) command file(s) already present at startup. Waiting for a new command."
+    }
+}
 
 function Get-NisWindowProcess {
     $matches = Get-Process |
@@ -85,6 +97,11 @@ while ($true) {
         $key = $command.FullName
         $stamp = $command.LastWriteTimeUtc.Ticks
         if ($seen.ContainsKey($key) -and $seen[$key] -eq $stamp) {
+            continue
+        }
+
+        if ($command.LastWriteTimeUtc -lt $startedAtUtc) {
+            $seen[$key] = $stamp
             continue
         }
 
