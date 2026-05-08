@@ -95,6 +95,142 @@ python AppHeraTriggerPython0417.py
 6. Start acquisition.
 7. Wait for the hypercube export to finish.
 
+## NIS Z Bridge
+
+The HERA app also communicates with the Nikon/NIS Z axis through a file bridge. The HERA PC and the NIS PC do not talk directly; the only shared communication path is the NAS folder:
+
+```text
+\\sti-nas1.rcp.epfl.ch\bios\bios-raw\backups\visible\cell\Jiayi_bios-raw\Z control shared
+```
+
+The NIS PC local bridge folder is:
+
+```text
+E:\Jiayi\NISZBridge
+```
+
+The coordinated bridge files are:
+
+- `AppHeraTriggerPython0417.py`: HERA UI, camera/stage control, and shared command writer.
+- `NIS-Z-Bridge/nis_z_sync_shared_to_local.py`: NIS-side Python sync between NAS and local fixed slots.
+- `NIS-Z-Bridge/nis_z_local_text_bridge_watcher.mac`: NIS macro that reads local commands and calls Nikon Z APIs.
+- `NIS-Z-Bridge/nis_z_macro_hotkey_runner.ps1`: NIS-side PowerShell runner that sends F4 to NIS-Elements when a local command appears.
+
+### GET Z Flow
+
+1. HERA writes `shared\commands\hera_YYYYMMDD_HHMMSS_xxxxxxxx.txt` with `GET_Z`.
+2. `nis_z_sync_shared_to_local.py` forwards it to `E:\Jiayi\NISZBridge\commands\current_getz.txt`.
+3. The sync writes `E:\Jiayi\NISZBridge\state\current_getz.id` with the HERA request id.
+4. The hotkey runner sees `current_getz.txt` and sends F4 to NIS-Elements.
+5. The NIS macro runs once, calls `StgGetPosZ(&z, 0)`, and writes `responses\current_getz_response.txt`.
+6. The sync publishes the local response to `shared\responses\<hera_request_id>.txt`.
+7. HERA reads the response and updates the Z display.
+
+The desired response format is:
+
+```text
+OK 5726.400000
+```
+
+or:
+
+```text
+ERROR message here
+```
+
+Units are micrometers.
+
+### NIS PC Update From GitHub
+
+When a bridge file changes in GitHub, update the NIS PC with:
+
+```powershell
+cd E:\Jiayi\NISZBridge
+
+Invoke-WebRequest `
+  -Uri "https://raw.githubusercontent.com/LinaGross/hera-trigger-app/main/NIS-Z-Bridge/nis_z_sync_shared_to_local.py" `
+  -OutFile ".\nis_z_sync_shared_to_local.py"
+
+Invoke-WebRequest `
+  -Uri "https://raw.githubusercontent.com/LinaGross/hera-trigger-app/main/NIS-Z-Bridge/nis_z_macro_hotkey_runner.ps1" `
+  -OutFile ".\nis_z_macro_hotkey_runner.ps1"
+
+Invoke-WebRequest `
+  -Uri "https://raw.githubusercontent.com/LinaGross/hera-trigger-app/main/NIS-Z-Bridge/nis_z_local_text_bridge_watcher.mac" `
+  -OutFile ".\nis_z_local_text_bridge_watcher.mac"
+```
+
+Reload the macro in NIS-Elements whenever `nis_z_local_text_bridge_watcher.mac` changes.
+
+### NIS Z Startup Order
+
+Use this order for each session:
+
+1. On the NIS PC, open NIS-Elements and load `E:\Jiayi\NISZBridge\nis_z_local_text_bridge_watcher.mac`.
+2. Start the sync script:
+
+```powershell
+cd E:\Jiayi\NISZBridge
+& C:\Users\adminbios\AppData\Local\Programs\Python\Python312\python.exe .\nis_z_sync_shared_to_local.py
+```
+
+3. In another PowerShell window, start the hotkey runner:
+
+```powershell
+cd E:\Jiayi\NISZBridge
+Remove-Item -LiteralPath .\stop_hotkey_runner.txt -ErrorAction SilentlyContinue
+
+powershell -ExecutionPolicy Bypass `
+  -File .\nis_z_macro_hotkey_runner.ps1 `
+  -RunHotkey "{F4}"
+```
+
+4. Restart the HERA app.
+5. Press GET Z once.
+
+### Useful NIS Diagnostics
+
+On the NIS PC:
+
+```powershell
+cd E:\Jiayi\NISZBridge
+
+Get-ChildItem .\commands | Select-Object Name,Length,LastWriteTime
+Get-ChildItem .\state | Select-Object Name,Length,LastWriteTime
+Get-ChildItem .\responses | Sort-Object LastWriteTime -Descending | Select-Object -First 10 Name,Length,LastWriteTime
+Get-ChildItem .\processed | Sort-Object LastWriteTime -Descending | Select-Object -First 10 Name,Length,LastWriteTime
+Get-ChildItem .\errors | Sort-Object LastWriteTime -Descending | Select-Object -First 10 Name,Length,LastWriteTime
+Get-Content .\nis_z_sync.log -Tail 40
+```
+
+On the shared NAS:
+
+```powershell
+$root = "\\sti-nas1.rcp.epfl.ch\bios\bios-raw\backups\visible\cell\Jiayi_bios-raw\Z control shared"
+
+Get-ChildItem -LiteralPath "$root\commands" |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 5 Name,Length,LastWriteTime
+
+Get-ChildItem -LiteralPath "$root\forwarded" |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 5 Name,Length,LastWriteTime
+
+Get-ChildItem -LiteralPath "$root\responses" |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 5 Name,Length,LastWriteTime
+```
+
+### Current Z Bridge Goal
+
+The immediate goal is reliable GET Z. The larger goal is full XYZ coordination:
+
+- display Z everywhere XY is displayed in the UI
+- display Z beside GET Z
+- support arbitrary Z moves, not only fixed increments
+- include X, Y, and Z in acquisition loops
+- after each hyperspectral image, return the stage to the correct XYZ position
+
 ## Notes
 
 - Some camera parameters, such as gain or ROI, may be read-only depending on the connected hardware configuration.

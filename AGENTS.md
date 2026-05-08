@@ -1,108 +1,85 @@
-# NIS PC Agent Instructions: Nikon Z Bridge
+# Agent Notes: HERA App And NIS Z Bridge
 
-## Goal
+This repo controls a HERA camera/stage app and a separate NIS-Elements Z-axis bridge. Work carefully and keep GitHub as the source of truth.
 
-Build the NIS-PC side of a Z-position bridge so the HERA PC can request Nikon Eclipse Ti Z actions through a shared folder.
+## Overall Goal
 
-The HERA PC already has a standalone text-protocol tester:
+Coordinate these files so the HERA PC and NIS PC can work together:
+
+- `AppHeraTriggerPython0417.py`
+- `NIS-Z-Bridge/nis_z_sync_shared_to_local.py`
+- `NIS-Z-Bridge/nis_z_local_text_bridge_watcher.mac`
+- `NIS-Z-Bridge/nis_z_macro_hotkey_runner.ps1`
+
+The immediate blocker is reliable GET Z from NIS into the HERA UI. The larger goal is full XYZ support:
+
+- display Z everywhere XY is displayed
+- display Z beside GET Z
+- allow arbitrary Z moves, not only predefined increments
+- include X, Y, and Z in acquisition loops
+- after each hyperspectral image, move back to the correct XYZ position
+
+## Machines And Paths
+
+The HERA PC runs the HERA app and writes requests to a shared NAS folder.
+
+The NIS PC controls the microscope and runs a local bridge from:
 
 ```text
-c:\BIOS DATA\Lina\PYTHON\hera-trigger-app\nis_z_text_bridge_test.py
+E:\Jiayi\NISZBridge
 ```
 
-Do not modify the main HERA app yet:
-
-```text
-AppHeraTriggerPython0417.py
-```
-
-## Shared Folder
-
-Use this shared folder for communication between PCs:
+The only shared communication path is:
 
 ```text
 \\sti-nas1.rcp.epfl.ch\bios\bios-raw\backups\visible\cell\Jiayi_bios-raw\Z control shared
 ```
 
-Current intended shared layout:
+Do not make the NIS macro read or write the UNC path directly. The macro should only touch local files under `E:\Jiayi\NISZBridge`.
+
+## Current Bridge Architecture
+
+HERA writes request files into:
 
 ```text
-Z control shared\
-  commands\
-  responses\
+Z control shared\commands\
 ```
 
-The HERA PC writes command files:
+The NIS sync script maps those request files into fixed local slots:
 
 ```text
-commands\<id>.txt
+E:\Jiayi\NISZBridge\commands\current_getz.txt
+E:\Jiayi\NISZBridge\state\current_getz.id
 ```
 
-The NIS PC must write matching response files:
+The hotkey runner notices local command files and sends F4 to NIS-Elements. The NIS macro runs once per F4, calls Nikon/NIS stage APIs, and writes local responses:
 
 ```text
-responses\<id>.txt
+E:\Jiayi\NISZBridge\responses\current_getz_response.txt
 ```
 
-## Important Findings So Far
-
-These tests were already done on the NIS PC:
-
-- Local NIS macro with `StgGetPosZ` works.
-- Local NIS macro with `StgMoveZ(1.0, 1)` works.
-- `StgZ_GetLimits` is unstable and caused NIS to close. Do not use it.
-- NIS macro files do not run correctly from the UNC shared folder. Copy macros locally before running them.
-- `Python_RunFile(...)` is not available in this NIS installation. Do not use it.
-- NIS macro `WriteFile(...)` works for local files, but not for the UNC shared folder.
-- For `WriteFile`, use a generous byte count such as `strlen(text) * 2`; small counts truncate output.
-
-Because NIS macros cannot write to the shared UNC path, the final NIS-PC side needs two local components:
-
-1. A normal Windows Python sync script running outside NIS.
-2. A local NIS macro watcher running inside NIS.
-
-## Required Architecture
-
-Use this data flow:
+The sync script publishes the response back to:
 
 ```text
-HERA PC
-  writes shared\commands\<id>.txt
-        |
-        v
-NIS PC normal Python sync script
-  copies shared command to C:\ZBridge\commands\<id>.txt
-        |
-        v
-NIS local macro watcher
-  reads C:\ZBridge\commands\<id>.txt
-  calls StgGetPosZ / StgMoveZ
-  writes C:\ZBridge\responses\<id>.txt
-        |
-        v
-NIS PC normal Python sync script
-  copies local response to shared\responses\<id>.txt
+Z control shared\responses\<hera_request_id>.txt
 ```
 
-Do not make NIS read or write the UNC path directly.
+## GET Z Flow
 
-## Text Protocol
+1. HERA writes `shared\commands\hera_YYYYMMDD_HHMMSS_xxxxxxxx.txt` containing `GET_Z`.
+2. `nis_z_sync_shared_to_local.py` forwards the newest fresh command to `commands\current_getz.txt`.
+3. The sync writes `state\current_getz.id` containing the HERA request id.
+4. `nis_z_macro_hotkey_runner.ps1` sees `current_getz.txt` and sends F4 to NIS-Elements.
+5. `nis_z_local_text_bridge_watcher.mac` runs once.
+6. The macro calls `StgGetPosZ(&z, 0)`.
+7. The macro writes `responses\current_getz_response.txt`.
+8. The sync publishes to `shared\responses\<hera_request_id>.txt`.
+9. HERA reads the response and displays Z in micrometers.
 
-Command file contents are plain ASCII text.
-
-Supported commands:
-
-```text
-GET_Z
-MOVE_REL 1.000000
-MOVE_ABS 1500.000000 1400.000000 1600.000000
-STOP
-```
-
-Response file contents:
+Response format:
 
 ```text
-OK 1520.400000
+OK 5726.400000
 ```
 
 or:
@@ -111,102 +88,127 @@ or:
 ERROR message here
 ```
 
-Units are micrometers.
+## Known Fragile Areas
 
-## NIS PC Local Folder
+- The NIS macro is sensitive. Make small, deliberate edits.
+- `StgZ_GetLimits` is unstable and has caused NIS to close. Do not use it.
+- `Python_RunFile(...)` is not available in this NIS installation. Do not use it.
+- NIS macros cannot reliably read/write the UNC NAS path. Keep macro I/O local.
+- `WriteFile(...)` in the NIS macro has been fragile. Previous small byte counts truncated responses. The current code used larger byte counts, but partial values like `OK 57` have appeared, so response completeness must be guarded.
+- `RenameFile(...)` argument order and destination collisions are important. Confirm behavior before changing it.
+- If `commands\current_getz.txt` remains without `state\current_getz.id`, new requests are blocked.
+- If `commands\current_getz.txt` and `state\current_getz.id` remain too long without a valid response, the slot is stale and should be archived by the sync.
+- The hotkey runner must not hammer F4 or delete responses while the macro is writing.
+- The HERA app must reset pending Z request state after timeout/failure and should fully exit on close to avoid duplicate HERA app instances.
 
-Create this folder structure on the NIS PC:
+## NIS PC Update From GitHub
 
-```text
-C:\ZBridge\
-  commands\
-  responses\
-  processed\
-  errors\
-```
+When changing NIS-side files in this repo, push to GitHub and give the user exact pull commands for the NIS PC.
 
-The NIS macro watcher should only use these local paths.
-
-## What To Implement On The NIS PC
-
-### 1. Normal Windows Python Sync Script
-
-Create a script, for example:
-
-```text
-C:\ZBridge\nis_z_sync_shared_to_local.py
-```
-
-It should:
-
-- Ensure local folders exist.
-- Ensure shared `commands` and `responses` folders exist.
-- Poll `shared\commands\*.txt`.
-- Copy each new command to `C:\ZBridge\commands\<id>.txt`.
-- Avoid copying the same command repeatedly; move copied shared commands to a shared `forwarded\` folder or track copied names in memory.
-- Poll `C:\ZBridge\responses\*.txt`.
-- Copy each local response to `shared\responses\<id>.txt`.
-- Move copied local responses to `C:\ZBridge\processed\`.
-- Log to `C:\ZBridge\nis_z_sync.log`.
-
-This script does not call NIS and does not move Z. It only syncs files.
-
-### 2. Local NIS Macro Watcher
-
-Create or adapt a pure NIS macro, for example:
-
-```text
-C:\ZBridge\nis_z_local_text_bridge_watcher.mac
-```
-
-It should:
-
-- Watch `C:/ZBridge/commands/*.txt`.
-- Read the first pending command with `ReadFile`.
-- Parse command text with `sscanf`.
-- For `GET_Z`: call `StgGetPosZ(&z, 0)`.
-- For `MOVE_REL`: check `abs(dz_um) <= 5.0`, then call `StgMoveZ(dz_um, 1)`, then read back Z.
-- For `MOVE_ABS`: check command target is inside command min/max, then call `StgMoveZ(z_um, 0)`, then read back Z.
-- For `STOP`: return current Z. Do not rely on interrupting a blocking `StgMoveZ`.
-- Write `OK <z_um>` or `ERROR <message>` to `C:/ZBridge/responses/<id>.txt`.
-- Move processed commands to `C:/ZBridge/processed/`.
-- Move failed commands to `C:/ZBridge/errors/`.
-
-Do not call `StgZ_GetLimits`.
-Do not call `Python_RunFile`.
-Do not read/write the UNC path from NIS.
-
-## HERA PC Test Commands
-
-From the HERA PC, test with:
+Use:
 
 ```powershell
-python .\hera-trigger-app\nis_z_text_bridge_test.py status
-python .\hera-trigger-app\nis_z_text_bridge_test.py get
-python .\hera-trigger-app\nis_z_text_bridge_test.py move-rel --dz-um 1 --yes
-python .\hera-trigger-app\nis_z_text_bridge_test.py move-rel --dz-um -1 --yes
+cd E:\Jiayi\NISZBridge
+
+Invoke-WebRequest `
+  -Uri "https://raw.githubusercontent.com/LinaGross/hera-trigger-app/main/NIS-Z-Bridge/nis_z_sync_shared_to_local.py" `
+  -OutFile ".\nis_z_sync_shared_to_local.py"
+
+Invoke-WebRequest `
+  -Uri "https://raw.githubusercontent.com/LinaGross/hera-trigger-app/main/NIS-Z-Bridge/nis_z_macro_hotkey_runner.ps1" `
+  -OutFile ".\nis_z_macro_hotkey_runner.ps1"
+
+Invoke-WebRequest `
+  -Uri "https://raw.githubusercontent.com/LinaGross/hera-trigger-app/main/NIS-Z-Bridge/nis_z_local_text_bridge_watcher.mac" `
+  -OutFile ".\nis_z_local_text_bridge_watcher.mac"
 ```
 
-Absolute Z should only be tested after relative moves are confirmed:
+If the macro changed, tell the user to reload `E:\Jiayi\NISZBridge\nis_z_local_text_bridge_watcher.mac` in NIS-Elements.
+
+## Startup Order
+
+Use this order for each test session:
+
+1. On the NIS PC, open NIS-Elements and load `E:\Jiayi\NISZBridge\nis_z_local_text_bridge_watcher.mac`.
+2. Start the sync script:
 
 ```powershell
-python .\hera-trigger-app\nis_z_text_bridge_test.py move-abs --z-um <safe_z> --min-z-um <min_safe_z> --max-z-um <max_safe_z> --yes
+cd E:\Jiayi\NISZBridge
+& C:\Users\adminbios\AppData\Local\Programs\Python\Python312\python.exe .\nis_z_sync_shared_to_local.py
 ```
 
-## Acceptance Criteria
+3. In another PowerShell window, start the hotkey runner:
 
-The bridge is working when:
+```powershell
+cd E:\Jiayi\NISZBridge
+Remove-Item -LiteralPath .\stop_hotkey_runner.txt -ErrorAction SilentlyContinue
 
-- HERA `get` returns `OK <z_um>` without timeout.
-- HERA `move-rel --dz-um 1 --yes` moves Nikon Z by about `+1 um` and returns `OK <z_um>`.
-- HERA `move-rel --dz-um -1 --yes` moves Nikon Z back by about `-1 um` and returns `OK <z_um>`.
-- No NIS crashes occur.
-- No changes are needed in `AppHeraTriggerPython0417.py` yet.
+powershell -ExecutionPolicy Bypass `
+  -File .\nis_z_macro_hotkey_runner.ps1 `
+  -RunHotkey "{F4}"
+```
 
-## Safety Notes
+4. Restart the HERA app.
+5. Press GET Z once.
 
-- Keep relative test moves small: `+1 um`, then `-1 um`.
-- Keep the objective/sample in a safe position before movement.
-- Do not use `StgZ_GetLimits`.
-- Keep NIS-Elements open and connected while the local macro watcher runs.
-- Stop the NIS watcher with the NIS macro stop/abort control.
+## Diagnostics To Ask For
+
+On the NIS PC:
+
+```powershell
+cd E:\Jiayi\NISZBridge
+
+Get-ChildItem .\commands | Select-Object Name,Length,LastWriteTime
+Get-ChildItem .\state | Select-Object Name,Length,LastWriteTime
+Get-ChildItem .\responses | Sort-Object LastWriteTime -Descending | Select-Object -First 10 Name,Length,LastWriteTime
+Get-ChildItem .\processed | Sort-Object LastWriteTime -Descending | Select-Object -First 10 Name,Length,LastWriteTime
+Get-ChildItem .\errors | Sort-Object LastWriteTime -Descending | Select-Object -First 10 Name,Length,LastWriteTime
+Get-Content .\nis_z_sync.log -Tail 40
+```
+
+On the shared NAS:
+
+```powershell
+$root = "\\sti-nas1.rcp.epfl.ch\bios\bios-raw\backups\visible\cell\Jiayi_bios-raw\Z control shared"
+
+Get-ChildItem -LiteralPath "$root\commands" |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 5 Name,Length,LastWriteTime
+
+Get-ChildItem -LiteralPath "$root\forwarded" |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 5 Name,Length,LastWriteTime
+
+Get-ChildItem -LiteralPath "$root\responses" |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 5 Name,Length,LastWriteTime
+```
+
+## Recent Debug History
+
+Recent symptoms:
+
+- HERA logs `NIS Z GET_Z ignored because another Z request is still waiting`.
+- HERA logs timeout waiting for a shared response.
+- Sometimes HERA displays a truncated/wrong Z such as `57.000 um` while NIS shows a longer value like `5726.xxx`.
+- The sync script previously did not stop promptly with Ctrl+C.
+- The hotkey runner previously sent F4 repeatedly and deleted incomplete response files.
+
+Recent fixes pushed:
+
+```text
+fcb0ba9 Make NIS Z sync recover orphan slots
+5bce7ec Stop repeated NIS Z macro retries
+48291bc Recover stale paired NIS Z slots
+```
+
+Those commits made the sync exit on Ctrl+C, archive stale local slots, ignore old shared backlog, wait for complete decimal responses, and made the hotkey runner less destructive.
+
+## Working Style
+
+- Work step by step.
+- Prefer small changes and immediate diagnostics.
+- Preserve user changes and do not reset the repo.
+- Keep GitHub updated after meaningful fixes.
+- When pushing NIS-side changes, include exact `Invoke-WebRequest` commands for the NIS PC.
+- Treat the macro as sensitive: inspect current GitHub and local context before editing it.
