@@ -8,6 +8,8 @@ The bridge is split into two parts:
   A normal Windows Python script that watches the shared NAS folder, maps supported shared commands into fixed local slot files, and publishes local responses back to the shared `responses\` folder.
 - `nis_z_local_text_bridge_watcher.mac`
   A NIS macro that only touches local paths under `E:\Jiayi\NISZBridge` and calls Nikon stage APIs.
+- `nis_z_macro_hotkey_runner.ps1`
+  A PowerShell watcher that watches local command slot files and presses F4 in NIS so the macro runs once per command.
 
 This separation is intentional. NIS should not read from or write to the UNC path directly.
 
@@ -55,6 +57,7 @@ Main files:
 
 - [nis_z_sync_shared_to_local.py](</E:/Jiayi/NISZBridge/nis_z_sync_shared_to_local.py>)
 - [nis_z_local_text_bridge_watcher.mac](</E:/Jiayi/NISZBridge/nis_z_local_text_bridge_watcher.mac>)
+- [nis_z_macro_hotkey_runner.ps1](</E:/Jiayi/NISZBridge/nis_z_macro_hotkey_runner.ps1>)
 - [README.md](</E:/Jiayi/NISZBridge/README.md>)
 - `nis_z_sync.log`
 
@@ -176,10 +179,11 @@ for($i = 0; $i -lt 30; $i++) {
 
 ## What the NIS PC operator should do
 
-The NIS PC has two roles:
+The NIS PC has three roles:
 
 - keep the Python sync script running
-- open NIS and run the macro when a command should be processed
+- keep the NIS macro open and ready to run with F4
+- keep the PowerShell hotkey runner running so each local command triggers one F4 press
 
 ### 1. Start the Python sync script
 
@@ -216,7 +220,27 @@ Important:
 
 - In this stable version, the macro is a single-run worker, not a continuous listener.
 - That means one `Run` handles one currently present fixed-slot command and then exits.
-- If a new command arrives later, run the macro again.
+- If a new command arrives later, the hotkey runner should press F4 and run the macro again.
+
+### 3. Start the macro hotkey runner
+
+Open a second Windows PowerShell window on the NIS PC and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File E:\Jiayi\NISZBridge\nis_z_macro_hotkey_runner.ps1 -WindowTitleContains "NIS" -RunHotkey "{F4}"
+```
+
+Leave this window open. It watches:
+
+`E:\Jiayi\NISZBridge\commands`
+
+When a fixed local command file appears, it brings NIS to the foreground and presses F4 once.
+
+To stop the runner cleanly:
+
+```powershell
+New-Item -ItemType File -Path E:\Jiayi\NISZBridge\stop_hotkey_runner.txt -Force
+```
 
 ## End-to-end flow
 
@@ -227,7 +251,7 @@ The stable end-to-end flow is:
 3. Python sync maps it into a fixed local slot file under `E:\Jiayi\NISZBridge\commands\`.
 4. Python sync writes `state\<slot>.id` containing the original shared command id.
 5. Python sync moves the original shared file into shared `forwarded\`.
-6. The NIS operator runs the macro.
+6. The hotkey runner sees the local command slot and presses F4 in NIS.
 7. The macro checks the fixed slot file and executes the matching Nikon stage action.
 8. The macro writes a fixed local response file under `responses\`.
 9. The macro moves the consumed local command into `processed\` or `errors\`.

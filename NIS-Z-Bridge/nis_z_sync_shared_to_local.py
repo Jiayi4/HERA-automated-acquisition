@@ -5,7 +5,6 @@ import shutil
 import signal
 import sys
 import time
-import ctypes
 from pathlib import Path
 from typing import Iterable
 
@@ -25,8 +24,6 @@ LOCAL_STATE_DIR = LOCAL_ROOT / "state"
 LOG_PATH = LOCAL_ROOT / "nis_z_sync.log"
 POLL_INTERVAL_SECONDS = 1.0
 COMMAND_SUFFIX = ".txt"
-NIS_WINDOW_TITLE_CONTAINS = "NIS"
-TRIGGER_NIS_HOTKEY_AFTER_FORWARD = True
 STALE_SLOT_SECONDS = 120.0
 
 COMMAND_SLOT_MAP = {
@@ -56,42 +53,6 @@ ACTIVE_LOCAL_COMMAND_NAMES = {
 EXPECTED_LOCAL_RESPONSE_NAMES = set(RESPONSE_SLOT_MAP)
 
 _STOP_REQUESTED = False
-
-
-def trigger_nis_macro_hotkey() -> bool:
-    """Bring NIS-Elements to the foreground and press F4 once."""
-    user32 = ctypes.windll.user32
-    target_hwnd = ctypes.c_void_p()
-
-    enum_windows_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-
-    def callback(hwnd, _lparam):
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length <= 0:
-            return True
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buffer, length + 1)
-        if NIS_WINDOW_TITLE_CONTAINS.lower() in buffer.value.lower():
-            target_hwnd.value = hwnd
-            return False
-        return True
-
-    user32.EnumWindows(enum_windows_proc(callback), 0)
-    if not target_hwnd.value:
-        logging.warning("Could not find a visible NIS window containing %r; macro hotkey not sent.", NIS_WINDOW_TITLE_CONTAINS)
-        return False
-
-    user32.SetForegroundWindow(target_hwnd)
-    time.sleep(0.2)
-    f4 = 0x73
-    keyeventf_keyup = 0x0002
-    user32.keybd_event(f4, 0, 0, 0)
-    time.sleep(0.05)
-    user32.keybd_event(f4, 0, keyeventf_keyup, 0)
-    logging.info("Sent F4 macro hotkey to NIS window.")
-    return True
 
 
 def configure_logging() -> None:
@@ -254,8 +215,6 @@ def forward_shared_commands() -> int:
                 slot_name,
                 archived_command,
             )
-            if TRIGGER_NIS_HOTKEY_AFTER_FORWARD:
-                trigger_nis_macro_hotkey()
             forwarded += 1
         except Exception as exc:
             if local_command.exists():
