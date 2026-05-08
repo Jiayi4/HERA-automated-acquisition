@@ -365,9 +365,13 @@ def publish_local_responses() -> int:
             response_id = slot_state.read_text(encoding="ascii").strip()
             shared_response = SHARED_RESPONSES_DIR / f"{response_id}.txt"
             processed_response = archive_name_conflict(LOCAL_PROCESSED_DIR / f"{response_id}__{local_response.name}")
+            local_command = LOCAL_COMMANDS_DIR / f"{slot_name}.txt"
+            processed_command = archive_name_conflict(LOCAL_PROCESSED_DIR / f"{response_id}__{slot_name}.txt")
 
             copy_text_file(local_response, shared_response)
             local_response.replace(processed_response)
+            if local_command.exists():
+                local_command.replace(processed_command)
             slot_state.unlink()
             logging.info(
                 "Published local response %s -> %s and archived to %s",
