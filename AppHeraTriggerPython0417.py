@@ -3254,12 +3254,9 @@ class HeraTriggerApp(tk.Tk):
                 except Exception:
                     pass
             setattr(self, job_attr, None)
-        # Destroy the window immediately so it disappears at once.
-        # Hardware cleanup runs in the background; the GUI process should not
-        # linger invisibly after the user closes the window.
+        self._cleanup_hardware()
         self.quit()
         self.destroy()
-        threading.Thread(target=self._cleanup_hardware, daemon=True).start()
 
     def _cleanup_hardware(self):
         try:
