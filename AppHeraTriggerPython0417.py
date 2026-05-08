@@ -913,6 +913,8 @@ class NISZBridgeController:
         self.shared_root = Path(shared_root or self.DEFAULT_SHARED_ROOT)
         self.commands_dir = self.shared_root / "commands"
         self.responses_dir = self.shared_root / "responses"
+        self.last_command_path = None
+        self.last_response_path = None
 
     def _send_and_wait(self, command_text, timeout_sec=90):
         command_text = command_text.strip()
@@ -931,6 +933,8 @@ class NISZBridgeController:
         command_path = self.commands_dir / f"{command_id}.txt"
         response_path = self.responses_dir / f"{command_id}.txt"
         tmp_path = command_path.with_suffix(command_path.suffix + ".tmp")
+        self.last_command_path = command_path
+        self.last_response_path = response_path
 
         tmp_path.write_text(command_text + "\n", encoding="ascii", newline="\n")
         tmp_path.replace(command_path)
@@ -952,6 +956,7 @@ class NISZBridgeController:
 
         raise RuntimeError(
             f"Timed out waiting for shared response {response_path}. "
+            f"The command was written to {command_path}. "
             "On the NIS PC, make sure nis_z_sync_shared_to_local.py is running and that F4 runs the NIS macro."
         )
 
@@ -1733,7 +1738,8 @@ class HeraTriggerApp(tk.Tk):
         def worker():
             with self.nis_z_request_lock:
                 try:
-                    z = self._get_nis_z_controller().get_z(timeout_sec=int(self.nis_z_timeout_var.get()))
+                    nis = self._get_nis_z_controller()
+                    z = nis.get_z(timeout_sec=int(self.nis_z_timeout_var.get()))
                     self._safe_after(0, lambda: self._set_nis_z_value(z))
                     self._set_var_async(self.nis_z_status_var, f"NIS Z: {z:.3f} um")
                     self._log_async(f"NIS Z GET_Z: {z:.3f} um")
@@ -3276,7 +3282,25 @@ class HeraTriggerApp(tk.Tk):
             pass
 
 
+def _claim_single_instance():
+    mutex_name = "Global\\HeraTriggerAppNISZBridgeSingleInstance"
+    handle = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+    if not handle:
+        return None
+    if ctypes.windll.kernel32.GetLastError() == 183:
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "HERA Trigger is already running. Close the existing HERA window before opening it again.",
+            "HERA Trigger",
+            0x00000030,
+        )
+        return None
+    return handle
+
+
 if __name__ == "__main__":
-    app = HeraTriggerApp()
-    app.mainloop()
+    _single_instance_handle = _claim_single_instance()
+    if _single_instance_handle:
+        app = HeraTriggerApp()
+        app.mainloop()
 
