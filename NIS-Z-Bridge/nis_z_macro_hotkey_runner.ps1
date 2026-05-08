@@ -35,6 +35,10 @@ function Get-ResponsePathForCommand {
     $stem = [System.IO.Path]::GetFileNameWithoutExtension($CommandName)
     switch ($stem) {
         "current_getz" { return Join-Path $ResponseDir "current_getz_response.txt" }
+        "current_move_rel_p1" { return Join-Path $ResponseDir "current_move_rel_p1_response.txt" }
+        "current_move_rel_m1" { return Join-Path $ResponseDir "current_move_rel_m1_response.txt" }
+        "current_move_rel_p10" { return Join-Path $ResponseDir "current_move_rel_p10_response.txt" }
+        "current_move_rel_m10" { return Join-Path $ResponseDir "current_move_rel_m10_response.txt" }
         "current_move_rel_custom" { return Join-Path $ResponseDir "current_move_rel_custom_response.txt" }
         "current_move_abs_4100_4050_7000" { return Join-Path $ResponseDir "current_move_abs_4100_4050_7000_response.txt" }
         "current_move_abs_4200_4000_8100" { return Join-Path $ResponseDir "current_move_abs_4200_4000_8100_response.txt" }

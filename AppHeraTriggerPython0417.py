@@ -3243,6 +3243,9 @@ class HeraTriggerApp(tk.Tk):
         if self.is_closing:
             return
         self.is_closing = True
+        hard_exit_timer = threading.Timer(3.0, lambda: os._exit(0))
+        hard_exit_timer.daemon = True
+        hard_exit_timer.start()
         self.timelapse_stop_event.set()
         self.timelapse_pause_event.clear()
         self.acquisition_done_event.set()
