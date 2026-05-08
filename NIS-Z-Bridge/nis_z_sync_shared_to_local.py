@@ -30,6 +30,7 @@ COMMAND_SUFFIX = ".txt"
 SHARED_COMMAND_MAX_AGE_SECONDS = 180.0
 STALE_LOCAL_SLOT_SECONDS = 120.0
 COMMAND_TIMESTAMP_RE = re.compile(r"(20\d{6}_\d{6})")
+COMPLETE_RESPONSE_RE = re.compile(r"^(ERROR\b.*|OK\s+[-+]?\d+\.\d+.*)$")
 
 COMMAND_SLOT_MAP = {
     "GET_Z": "current_getz",
@@ -192,6 +193,19 @@ def recover_stale_local_slots() -> None:
         logging.warning("Archived orphan local command %s -> %s", local_command, archived)
 
 
+def response_text(local_response: Path) -> str:
+    return local_response.read_text(encoding="ascii", errors="ignore").replace("\x00", "").strip()
+
+
+def is_complete_response(local_response: Path) -> bool:
+    try:
+        text = response_text(local_response)
+    except OSError:
+        return False
+
+    return bool(COMPLETE_RESPONSE_RE.match(text))
+
+
 def forward_shared_commands() -> int:
     forwarded = 0
 
@@ -251,6 +265,18 @@ def publish_local_responses() -> int:
     for local_response in iter_txt_files(LOCAL_RESPONSES_DIR):
         slot_name = RESPONSE_SLOT_MAP.get(local_response.name)
         if slot_name is None:
+            continue
+
+        if not is_complete_response(local_response):
+            try:
+                incomplete_text = response_text(local_response)
+            except OSError as exc:
+                incomplete_text = f"<unreadable: {exc}>"
+            logging.warning(
+                "Waiting for complete local response in %s: %r",
+                local_response,
+                incomplete_text,
+            )
             continue
 
         slot_state = state_file_for_slot(slot_name)

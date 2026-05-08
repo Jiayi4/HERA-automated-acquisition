@@ -23,11 +23,21 @@ Add-Type -AssemblyName System.Windows.Forms
 
 $lastSent = @{}
 $lastHotkeyAt = Get-Date "2000-01-01"
+$startupCommands = @{}
 
 Write-Host "Starting macro hotkey runner. WindowTitleContains='$WindowTitleContains' Hotkey='$RunHotkey'"
 Write-Host "Watching: $CommandDir"
 Write-Host "Responses: $ResponseDir"
 Write-Host "Stop file: $StopFile"
+
+if (Test-Path -LiteralPath $CommandDir) {
+    Get-ChildItem -LiteralPath $CommandDir -Filter "*.txt" -File -ErrorAction SilentlyContinue |
+        ForEach-Object { $startupCommands[$_.FullName] = $_.LastWriteTimeUtc }
+
+    if ($startupCommands.Count -gt 0) {
+        Write-Host "$(Get-Date -Format s) Ignoring $($startupCommands.Count) command file(s) already present at startup. Waiting for a new command."
+    }
+}
 
 function Get-ResponsePathForCommand {
     param([string]$CommandName)
@@ -64,26 +74,13 @@ function Test-CompleteResponse {
         return $true
     }
 
-    return ($text -match '^OK\s+[-+]?\d+\.\d+\s*$')
+    return ($text -match '^OK\s+[-+]?\d+(\.\d+)?\s*$')
 }
 
-function Remove-IncompleteResponse {
+function Test-ResponseExists {
     param([string]$Path)
 
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
-        return
-    }
-
-    if (Test-CompleteResponse -Path $Path) {
-        return
-    }
-
-    try {
-        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
-        Write-Host "$(Get-Date -Format s) Removed incomplete response '$Path' before retrying macro."
-    } catch {
-        Write-Host "$(Get-Date -Format s) Could not remove incomplete response '$Path': $($_.Exception.Message)"
-    }
+    return ($Path -and (Test-Path -LiteralPath $Path))
 }
 
 function Get-NisWindowProcess {
@@ -144,6 +141,9 @@ while ($true) {
 
     foreach ($command in $commands) {
         $key = $command.FullName
+        if ($startupCommands.ContainsKey($key) -and $command.LastWriteTimeUtc -le $startupCommands[$key]) {
+            continue
+        }
 
         $ageSeconds = ((Get-Date).ToUniversalTime() - $command.LastWriteTimeUtc).TotalSeconds
         if ($ageSeconds -gt $MaxCommandAgeSeconds) {
@@ -155,7 +155,9 @@ while ($true) {
             continue
         }
 
-        Remove-IncompleteResponse -Path $responsePath
+        if (Test-ResponseExists -Path $responsePath) {
+            continue
+        }
 
         if ($lastSent.ContainsKey($key)) {
             $retryElapsed = ((Get-Date) - $lastSent[$key]).TotalSeconds
