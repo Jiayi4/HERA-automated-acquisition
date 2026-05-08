@@ -132,6 +132,19 @@ def archive_local_file(source: Path, archive_root: Path, reason: str) -> Path:
     return destination
 
 
+def describe_optional_file(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+
+    try:
+        age = age_seconds(path)
+        text = path.read_text(encoding="ascii", errors="replace").strip()
+    except Exception as exc:
+        return f"present but unreadable: {exc}"
+
+    return f"present age={age:.1f}s text={text!r}"
+
+
 def recover_stale_local_slots() -> None:
     for local_command in iter_txt_files(LOCAL_COMMANDS_DIR):
         if local_command.name not in ACTIVE_LOCAL_COMMAND_NAMES:
@@ -144,6 +157,11 @@ def recover_stale_local_slots() -> None:
 
         archived = archive_local_file(local_command, LOCAL_ERRORS_DIR, "stale_local_command")
         logging.warning("Archived stale local command %s -> %s", local_command, archived)
+
+        slot_state = state_file_for_slot(local_command.stem)
+        if slot_state.exists():
+            archived_state = archive_local_file(slot_state, LOCAL_ERRORS_DIR, "state_for_stale_command")
+            logging.warning("Archived state for stale local command %s -> %s", slot_state, archived_state)
 
     for slot_state in sorted(
         (path for path in LOCAL_STATE_DIR.glob("*.id") if path.is_file()),
@@ -212,7 +230,18 @@ def forward_shared_commands() -> int:
         local_command = LOCAL_COMMANDS_DIR / f"{slot_name}.txt"
         slot_state = state_file_for_slot(slot_name)
         if local_command.exists() or slot_state.exists():
-            logging.warning("Local slot is busy, leaving shared command in place: %s", slot_name)
+            response_name = next(
+                (name for name, response_slot in RESPONSE_SLOT_MAP.items() if response_slot == slot_name),
+                None,
+            )
+            local_response = LOCAL_RESPONSES_DIR / response_name if response_name else None
+            logging.warning(
+                "Local slot is busy, leaving shared command in place: %s; command=%s; state=%s; response=%s",
+                slot_name,
+                describe_optional_file(local_command),
+                describe_optional_file(slot_state),
+                describe_optional_file(local_response) if local_response else "not expected",
+            )
             continue
 
         try:
