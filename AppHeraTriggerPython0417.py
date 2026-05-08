@@ -3257,6 +3257,7 @@ class HeraTriggerApp(tk.Tk):
         self._cleanup_hardware()
         self.quit()
         self.destroy()
+        os._exit(0)
 
     def _cleanup_hardware(self):
         try:
