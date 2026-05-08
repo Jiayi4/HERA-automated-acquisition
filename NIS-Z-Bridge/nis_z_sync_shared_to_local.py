@@ -49,6 +49,7 @@ RESPONSE_SLOT_MAP = {
     "current_move_abs_4200_4000_8100_response.txt": "current_move_abs_4200_4000_8100",
     "current_stop_response.txt": "current_stop",
 }
+SLOT_RESPONSE_MAP = {slot_name: response_name for response_name, slot_name in RESPONSE_SLOT_MAP.items()}
 
 _STOP_REQUESTED = False
 _LAST_STALE_BACKLOG_LOG_AT = 0.0
@@ -170,6 +171,13 @@ def state_file_for_slot(slot_name: str) -> Path:
     return LOCAL_STATE_DIR / f"{slot_name}.id"
 
 
+def response_file_for_slot(slot_name: str) -> Path | None:
+    response_name = SLOT_RESPONSE_MAP.get(slot_name)
+    if response_name is None:
+        return None
+    return LOCAL_RESPONSES_DIR / response_name
+
+
 def age_seconds(path: Path) -> float:
     return max(0.0, time.time() - path.stat().st_mtime)
 
@@ -184,9 +192,26 @@ def recover_stale_local_slots() -> None:
     for local_command in iter_txt_files(LOCAL_COMMANDS_DIR):
         slot_name = local_command.stem
         slot_state = state_file_for_slot(slot_name)
-        if slot_state.exists():
-            continue
         if age_seconds(local_command) <= STALE_LOCAL_SLOT_SECONDS:
+            continue
+
+        slot_response = response_file_for_slot(slot_name)
+        if slot_response is not None and slot_response.exists() and is_complete_response(slot_response):
+            continue
+
+        if slot_state.exists():
+            archived_command = archive_local_file(local_command, LOCAL_ERRORS_DIR, "stale_local_command")
+            archived_state = archive_local_file(slot_state, LOCAL_ERRORS_DIR, "state_for_stale_command")
+            logging.warning(
+                "Archived stale local command %s -> %s and state %s -> %s",
+                local_command,
+                archived_command,
+                slot_state,
+                archived_state,
+            )
+            if slot_response is not None and slot_response.exists():
+                archived_response = archive_local_file(slot_response, LOCAL_ERRORS_DIR, "response_for_stale_command")
+                logging.warning("Archived stale local response %s -> %s", slot_response, archived_response)
             continue
 
         archived = archive_local_file(local_command, LOCAL_ERRORS_DIR, "orphan_local_command")
