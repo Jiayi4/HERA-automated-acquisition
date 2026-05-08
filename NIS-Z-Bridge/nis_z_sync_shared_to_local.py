@@ -28,6 +28,7 @@ LOG_PATH = LOCAL_ROOT / "nis_z_sync.log"
 POLL_INTERVAL_SECONDS = 1.0
 COMMAND_SUFFIX = ".txt"
 SHARED_COMMAND_MAX_AGE_SECONDS = 180.0
+STALE_LOCAL_SLOT_SECONDS = 120.0
 COMMAND_TIMESTAMP_RE = re.compile(r"(20\d{6}_\d{6})")
 
 COMMAND_SLOT_MAP = {
@@ -168,6 +169,29 @@ def state_file_for_slot(slot_name: str) -> Path:
     return LOCAL_STATE_DIR / f"{slot_name}.id"
 
 
+def age_seconds(path: Path) -> float:
+    return max(0.0, time.time() - path.stat().st_mtime)
+
+
+def archive_local_file(source: Path, archive_root: Path, reason: str) -> Path:
+    destination = archive_name_conflict(archive_root / f"{source.stem}__{reason}{source.suffix}")
+    source.replace(destination)
+    return destination
+
+
+def recover_stale_local_slots() -> None:
+    for local_command in iter_txt_files(LOCAL_COMMANDS_DIR):
+        slot_name = local_command.stem
+        slot_state = state_file_for_slot(slot_name)
+        if slot_state.exists():
+            continue
+        if age_seconds(local_command) <= STALE_LOCAL_SLOT_SECONDS:
+            continue
+
+        archived = archive_local_file(local_command, LOCAL_ERRORS_DIR, "orphan_local_command")
+        logging.warning("Archived orphan local command %s -> %s", local_command, archived)
+
+
 def forward_shared_commands() -> int:
     forwarded = 0
 
@@ -258,27 +282,31 @@ def publish_local_responses() -> int:
 def request_stop(signum: int, _frame: object) -> None:
     global _STOP_REQUESTED
     _STOP_REQUESTED = True
-    logging.info("Received signal %s, stopping after current poll cycle.", signum)
+    raise KeyboardInterrupt
 
 
 def main() -> int:
     ensure_directories()
     configure_logging()
 
-    signal.signal(signal.SIGINT, request_stop)
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, request_stop)
-
     logging.info("Starting NIS Z fixed-slot shared/local sync bridge.")
     logging.info("Shared root: %s", SHARED_ROOT)
     logging.info("Local root: %s", LOCAL_ROOT)
 
-    while not _STOP_REQUESTED:
-        forwarded = forward_shared_commands()
-        published = publish_local_responses()
+    signal.signal(signal.SIGINT, request_stop)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, request_stop)
 
-        if forwarded == 0 and published == 0:
-            time.sleep(POLL_INTERVAL_SECONDS)
+    try:
+        while not _STOP_REQUESTED:
+            recover_stale_local_slots()
+            forwarded = forward_shared_commands()
+            published = publish_local_responses()
+
+            if forwarded == 0 and published == 0:
+                time.sleep(POLL_INTERVAL_SECONDS)
+    except KeyboardInterrupt:
+        logging.info("NIS Z fixed-slot shared/local sync bridge interrupted by user.")
 
     logging.info("NIS Z fixed-slot shared/local sync bridge stopped.")
     return 0
