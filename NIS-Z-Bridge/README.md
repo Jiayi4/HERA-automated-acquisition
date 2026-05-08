@@ -304,6 +304,55 @@ Useful places to inspect:
 - `E:\Jiayi\NISZBridge\state`
 - `E:\Jiayi\NISZBridge\nis_z_sync.log`
 
+### Stuck slot recovery
+
+A slot gets stuck when a macro run is aborted or produces an incomplete response. Signs:
+
+- `nis_z_sync.log` repeats `Waiting for complete local response` with a truncated value like `'OK 56'`
+- `responses\current_getz_response.txt` contains `OK 56` instead of `OK 56.000000`
+- GET Z on HERA keeps timing out
+
+Recovery steps on the NIS PC:
+
+```powershell
+# 1 — clear the stuck slot
+Remove-Item -LiteralPath "E:\Jiayi\NISZBridge\commands\current_getz.txt" -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath "E:\Jiayi\NISZBridge\state\current_getz.id" -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath "E:\Jiayi\NISZBridge\responses\current_getz_response.txt" -ErrorAction SilentlyContinue
+
+# 2 — pull the latest macro (must have strlen(response) * 2 in every WriteFile call)
+cd E:\Jiayi\NISZBridge
+Invoke-WebRequest `
+  -Uri "https://raw.githubusercontent.com/LinaGross/hera-trigger-app/main/NIS-Z-Bridge/nis_z_local_text_bridge_watcher.mac" `
+  -OutFile ".\nis_z_local_text_bridge_watcher.mac"
+
+# 3 — reload the macro in NIS-Elements (close and reopen the .mac file in the macro editor)
+```
+
+After reloading and pressing GET Z, verify with:
+
+```powershell
+Get-Content E:\Jiayi\NISZBridge\nis_z_sync.log -Tail 20
+```
+
+A successful cycle shows `Forwarded shared command ... into slot current_getz` followed by `Published local response ...`.
+
+### Stale NAS command accumulation
+
+Each GET Z timeout previously left an orphan command file in the shared NAS `commands\` folder. The sync script ignores files older than 180 seconds, so they do not block new commands, but hundreds of them can accumulate and clutter the directory.
+
+One-time cleanup on the NIS PC:
+
+```powershell
+$root = "\\sti-nas1.rcp.epfl.ch\bios\bios-raw\backups\visible\cell\Jiayi_bios-raw\Z control shared"
+$cutoff = (Get-Date).AddSeconds(-180)
+Get-ChildItem -LiteralPath "$root\commands" -Filter "*.txt" |
+  Where-Object { $_.LastWriteTime -lt $cutoff } |
+  Remove-Item -Force
+```
+
+The HERA app (commit `1cf8139`) now deletes the command file on timeout, so this accumulation will not recur.
+
 ## NIS macro pitfalls and lessons learned
 
 These points were learned during debugging and should be kept in mind if the macro is upgraded later.
@@ -336,6 +385,20 @@ Observed pain points:
 - Pointer-heavy string handling such as `strrchr(...)` based path parsing was fragile.
 - Comment-heavy or more complex macro files sometimes behaved unexpectedly during testing.
 - A macro that looked syntactically fine could still silently fail in the interpreter.
+
+### WriteFile byte count must be `strlen(response) * 2`
+
+NIS-Elements' macro interpreter stores string variables in a UTF-16-like internal format. When passing a string variable to `WriteFile`, the byte count must be `strlen(response) * 2`:
+
+```c
+sprintf(response, "OK %.6f", z);
+WriteFile("...", response, strlen(response) * 2);  // correct — full decimal written
+WriteFile("...", response, strlen(response));       // wrong — output truncated
+```
+
+Using plain `strlen` causes WriteFile to write only half the characters. `"OK 5726.400000"` becomes `"OK 56"`. The macro does not crash — it keeps running, `RenameFile` still executes — but the response is incomplete and will be rejected by the sync script's completeness check, leaving the slot stuck.
+
+This only applies to string variables. Fixed string literals with a hardcoded byte count (e.g., `"started", 20`) work as-is.
 
 ### Stable pattern that worked
 
