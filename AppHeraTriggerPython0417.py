@@ -1080,6 +1080,8 @@ class HeraTriggerApp(tk.Tk):
         self.latest_live_frame = None
         self.live_autocontrast_var = tk.BooleanVar(value=True)
         self.live_show_saturation_var = tk.BooleanVar(value=False)
+        self.live_gamma_var = tk.DoubleVar(value=1.0)
+        self.live_gamma_label_var = tk.StringVar(value="Gamma 1.0")
         self.live_display_rect = None
         self.live_display_frame_size = None
         self.live_cursor_image_xy = None
@@ -1487,22 +1489,38 @@ class HeraTriggerApp(tk.Tk):
         notebook.add(live_tab, text="Live View")
         notebook.add(hyper_tab, text="Hyperspectral View")
 
-        live_cursor_bar = tk.Frame(live_tab, bg=self.theme["panel"])
-        live_cursor_bar.pack(fill="x", padx=8, pady=(8, 4))
+        live_controls = tk.Frame(live_tab, bg=self.theme["panel"])
+        live_controls.pack(fill="x", padx=8, pady=(8, 4))
+
+        live_cursor_bar = tk.Frame(live_controls, bg=self.theme["panel"])
+        live_cursor_bar.pack(fill="x")
         tk.Label(live_cursor_bar, textvariable=self.live_cursor_var, fg="#e7edf5", bg=self.theme["panel"],
-                 font=("Segoe UI Semibold", 10)).pack(side="left")
-        tk.Checkbutton(live_cursor_bar, text="Auto Contrast", variable=self.live_autocontrast_var,
+                 font=("Segoe UI Semibold", 10), anchor="w").pack(side="left", fill="x", expand=True)
+
+        live_display_bar = tk.Frame(live_controls, bg=self.theme["panel"])
+        live_display_bar.pack(fill="x", pady=(4, 0))
+        tk.Checkbutton(live_display_bar, text="Auto Contrast", variable=self.live_autocontrast_var,
                        command=lambda: self._schedule_live_render(force=True),
                        bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
                        activebackground=self.theme["panel"]).pack(side="left", padx=(12, 0))
-        tk.Checkbutton(live_cursor_bar, text="Show Saturation", variable=self.live_show_saturation_var,
+        tk.Checkbutton(live_display_bar, text="Show Saturation", variable=self.live_show_saturation_var,
                        command=lambda: self._schedule_live_render(force=True),
                        bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
                        activebackground=self.theme["panel"]).pack(side="left", padx=(8, 0))
-        tk.Button(live_cursor_bar, text="Snapshot", command=self.snapshot_live_view).pack(side="left", padx=(8, 0))
-        tk.Button(live_cursor_bar, textvariable=self.live_roi_button_var, command=self.toggle_live_roi_selection).pack(side="right")
-        tk.Button(live_cursor_bar, text="Clear ROI", command=self.clear_live_roi_selection).pack(side="right", padx=(0, 6))
-        tk.Label(live_cursor_bar, textvariable=self.live_roi_status_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="right", padx=(0, 10))
+        tk.Label(live_display_bar, textvariable=self.live_gamma_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(10, 4))
+        tk.Scale(live_display_bar, variable=self.live_gamma_var, from_=0.2, to=3.0, resolution=0.1,
+                 orient="horizontal", length=110, showvalue=False, command=self.on_live_gamma_change,
+                 bg=self.theme["panel"], fg=self.theme["text"], troughcolor=self.theme["field"],
+                 highlightthickness=0).pack(side="left")
+        tk.Button(live_display_bar, text="Reset Gamma", command=self.reset_live_gamma).pack(side="left", padx=(6, 0))
+        tk.Button(live_display_bar, text="Snapshot", command=self.snapshot_live_view).pack(side="left", padx=(8, 0))
+
+        live_roi_bar = tk.Frame(live_controls, bg=self.theme["panel"])
+        live_roi_bar.pack(fill="x", pady=(4, 0))
+        tk.Button(live_roi_bar, textvariable=self.live_roi_button_var, command=self.toggle_live_roi_selection).pack(side="right")
+        tk.Button(live_roi_bar, text="Clear ROI", command=self.clear_live_roi_selection).pack(side="right", padx=(0, 6))
+        tk.Label(live_roi_bar, textvariable=self.live_roi_status_var, fg="#9aa6b2", bg=self.theme["panel"],
+                 anchor="w").pack(side="left", fill="x", expand=True)
         self.live_view_canvas = tk.Canvas(live_tab, bg="#101418", highlightthickness=0)
         self.live_view_canvas.bind("<Motion>", self.on_live_mouse_move)
         self.live_view_canvas.bind("<Button-1>", self.on_live_mouse_click)
@@ -3151,6 +3169,40 @@ class HeraTriggerApp(tk.Tk):
         )
         return normalized, min_value, max_value
 
+    def _get_live_display_gamma(self):
+        try:
+            gamma = float(self.live_gamma_var.get())
+        except Exception:
+            gamma = 1.0
+        return max(0.2, min(3.0, gamma))
+
+    def on_live_gamma_change(self, _value=None):
+        gamma = self._get_live_display_gamma()
+        self.live_gamma_label_var.set(f"Gamma {gamma:.1f}")
+        self._schedule_live_render(force=True)
+
+    def reset_live_gamma(self):
+        self.live_gamma_var.set(1.0)
+        self.on_live_gamma_change()
+
+    def _apply_live_display_gamma(self, gray_bytes):
+        gamma = self._get_live_display_gamma()
+        if not gray_bytes or abs(gamma - 1.0) < 0.01:
+            return gray_bytes
+        inverse_gamma = 1.0 / gamma
+        lookup = bytes(
+            max(0, min(255, int(round(((value / 255.0) ** inverse_gamma) * 255.0))))
+            for value in range(256)
+        )
+        return gray_bytes.translate(lookup)
+
+    def _prepare_live_display_bytes(self, gray_bytes):
+        if self.live_autocontrast_var.get():
+            render_bytes, _, _ = self._normalize_grayscale_for_display(gray_bytes)
+        else:
+            render_bytes = gray_bytes
+        return self._apply_live_display_gamma(render_bytes)
+
     def _grayscale_to_rgb_bytes(self, gray_bytes, src_width, src_height, dest_width, dest_height, saturation_mask=None):
         scaled = self._resample_grayscale_nearest(gray_bytes, src_width, src_height, dest_width, dest_height)
         scaled_mask = None
@@ -3228,10 +3280,7 @@ class HeraTriggerApp(tk.Tk):
             src_width, src_height, gray_bytes = frame
             saturation_mask = None
 
-        if self.live_autocontrast_var.get():
-            render_bytes, _, _ = self._normalize_grayscale_for_display(gray_bytes)
-        else:
-            render_bytes = gray_bytes
+        render_bytes = self._prepare_live_display_bytes(gray_bytes)
         render_mask = saturation_mask if self.live_show_saturation_var.get() else None
 
         default_dir = self.param_vars.get("output_path").get() if "output_path" in self.param_vars else ""
@@ -3423,10 +3472,7 @@ class HeraTriggerApp(tk.Tk):
             else:
                 src_width, src_height, gray_bytes = frame
                 saturation_mask = None
-            if self.live_autocontrast_var.get():
-                render_bytes, _, _ = self._normalize_grayscale_for_display(gray_bytes)
-            else:
-                render_bytes = gray_bytes
+            render_bytes = self._prepare_live_display_bytes(gray_bytes)
             render_mask = saturation_mask if self.live_show_saturation_var.get() else None
             canvas = self.live_view_canvas
             width = max(canvas.winfo_width(), 10)

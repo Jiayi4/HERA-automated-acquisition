@@ -119,7 +119,10 @@ The Live View tab includes controls for choosing an ROI and judging exposure bef
 - `Clear ROI`: resets the ROI fields to the full current live-frame size when a live frame is available.
 - `Auto Contrast`: display-only contrast stretching for the live preview. It helps make dim frames visible and does not change camera exposure, gain, or saved acquisition data.
 - `Show Saturation`: overlays saturated live-preview pixels in red using the saturation threshold returned by `HeraAPI_GetLiveCaptureInfo`.
+- `Gamma`: display-only brightness response control applied after auto-contrast. `1.0` is neutral; higher values brighten shadows and lower values darken the display. `Reset Gamma` returns it to `1.0`.
 - `Snapshot`: saves the latest live frame as a PNG. The file uses the current display choices, so auto-contrast and the red saturation overlay are included when enabled. It saves the live image content, not the canvas text labels or ROI outline.
+
+The Live View toolbar is split into separate cursor, display, and ROI rows so controls remain visible as more live-view tools are enabled.
 
 ## NIS Z Bridge
 
