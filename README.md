@@ -32,6 +32,7 @@ The current implementation is focused on software-triggered acquisition and is s
 - editable ROI corners, ROI width/height, and ROI area helpers
 - asynchronous acquisition callback handling
 - hypercube generation with `HeraAPI_GetHyperCubeEx`, plus ENVI post-export ROI cropping when the SDK returns a full-frame cube
+- flatfield reference acquisition and normalized cube export/display when a compatible flatfield is present
 - HyperLAB shortcut support for opening the latest exported `.hdr` through Nireos HyperLAB
 - ENVI export to a user-selected output folder
 
@@ -142,7 +143,17 @@ The saving panel includes a notes field. These notes are written into the ENVI e
 
 When an ROI is selected, the SDK acquisition still runs through the normal full-frame hyperspectral path. The app then exports the full cube temporarily, crops the ENVI binary/header on disk to the selected ROI, and removes the temporary full-frame export. The Hyperspectral View uses the same selected ROI by cropping each displayed SDK band in memory, so the viewer and saved `.hdr`/data file match.
 
+## Flatfield
+
+The Flatfield panel follows the original Hera Acquisition App concept: acquire a white diffusive surface as a reference, then use it to normalize later sample measurements. `Acquire Flatfield` runs a normal Hera acquisition and stores the resulting hypercube as the reference. `Clear Flatfield` removes it.
+
+When a later sample cube has matching source size, displayed ROI, band count, and data type, the app exports an additional `_nrm` ENVI cube where each sample pixel is divided by the matching flatfield pixel. The Hyperspectral View also displays normalized bands when a compatible flatfield is active.
+
 The saving panel also includes a HyperLAB section. `Open Current` launches `C:\Users\Public\Desktop\Nireos HyperLAB.lnk` with the latest exported `.hdr` when Windows accepts the file argument; otherwise it opens HyperLAB and copies the `.hdr` path to the clipboard.
+
+## Saved Positions And Dummy Z
+
+Saved XYZ positions no longer depend on a successful NIS Z bridge read. If a cached real Z value is available it is used; otherwise the app saves `Z=0.000` as a dummy placeholder so XY site saving remains usable while Z integration is being debugged.
 
 ## NIS Z Bridge
 
