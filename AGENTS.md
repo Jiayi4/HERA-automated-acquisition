@@ -102,9 +102,13 @@ ERROR message here
 - The HERA app must reset pending Z request state after timeout/failure and should fully exit on close to avoid duplicate HERA app instances.
 - HERA live capture can make gain/exposure/ROI read-only or slow to stop. Keep parameter apply off the Tk main thread: pause live capture in a worker, apply camera settings, then schedule UI updates and live restart back on Tk.
 - Live cursor sample coordinates are not provided by the Hera SDK directly. The app maps canvas mouse coordinates to live-frame pixels, then converts pixel offset from image center into Tango sample X/Y using `Stage units / pixel`, `Invert X`, `Invert Y`, and `Swap XY`.
+- The active UI is a resizable three-pane layout: left for status/exposure/ROI/XYZ/saved positions/NIS Z, center for spectral settings and live/hyperspectral views, and right for acquisition/timelapse/saving. Keep new controls in the appropriate pane and avoid reintroducing duplicate saved-position or ROI controls elsewhere.
+- Light/dark mode is controlled by `theme_mode`, `theme_button_var`, `_configure_theme`, and `toggle_theme_mode`. When adding widgets, prefer `self.theme[...]` colors so the switch can recolor them.
 - Live ROI selection is display-driven: two clicks on the rendered live image are mapped back to Hera live-frame pixels and copied into the ROI parameter fields. The ROI is only sent to the camera when the user presses `Apply Parameters`.
+- ROI can also be edited through top-left/bottom-right corners, size fields, or a near-square area helper. Hera still accepts rectangular `x, y, width, height`, so corner edits must be normalized back to rectangular ROI fields before camera apply.
 - Live exposure helpers are display-only. `Auto Contrast` stretches the rendered preview, `Gamma` remaps brightness after auto-contrast, `Show Saturation` paints saturated pixels red from the SDK live-frame saturation threshold, and `Snapshot` writes the latest live frame as a PNG with those display choices applied. These controls must not alter camera exposure, gain, ROI, or acquisition data.
-- Keep the Live View toolbar split into cursor, display, and ROI rows. New controls should go into the appropriate row so ROI controls and coordinate readouts do not overlap or disappear on narrower windows.
+- The live cursor readout should stay compact and stable in the left Status panel. Avoid adding pixel-coordinate text there if it makes the panel jump while moving the mouse over live view.
+- Saving notes are stored in `saving_notes_var` and appended to the ENVI export description.
 
 ## NIS PC Update From GitHub
 

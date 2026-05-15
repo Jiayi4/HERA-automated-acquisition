@@ -1036,7 +1036,8 @@ class HeraTriggerApp(tk.Tk):
         self.title("Hera + Tango Trigger Control")
         self.geometry("1480x980")
         self.minsize(1360, 900)
-        self.configure(bg="#14181d")
+        self.theme_mode = "dark"
+        self.theme_button_var = tk.StringVar(value="Light Mode")
 
         self.controller = None
         self.tango = None
@@ -1073,7 +1074,7 @@ class HeraTriggerApp(tk.Tk):
         self.last_export_var = tk.StringVar(value="Last export: -")
         self.hypercube_summary_var = tk.StringVar(value="Cube: waiting for acquisition")
         self.live_view_status_var = tk.StringVar(value="Live view: waiting for frames")
-        self.live_cursor_var = tk.StringVar(value="Live cursor: -")
+        self.live_cursor_var = tk.StringVar(value=self._live_cursor_status_text("-"))
         self.pending_export_tag = None
         self.live_photo = None
         self.live_frame_info = None
@@ -1082,6 +1083,11 @@ class HeraTriggerApp(tk.Tk):
         self.live_show_saturation_var = tk.BooleanVar(value=False)
         self.live_gamma_var = tk.DoubleVar(value=1.0)
         self.live_gamma_label_var = tk.StringVar(value="Gamma 1.0")
+        self.live_zoom_factor = 1.0
+        self.live_zoom_label_var = tk.StringVar(value="Zoom 100%")
+        self.live_pan_x = 0.0
+        self.live_pan_y = 0.0
+        self.live_pan_drag_start = None
         self.live_display_rect = None
         self.live_display_frame_size = None
         self.live_cursor_image_xy = None
@@ -1092,6 +1098,7 @@ class HeraTriggerApp(tk.Tk):
         self.live_roi_status_var = tk.StringVar(value="ROI: -")
         self.latest_stage_xy = None
         self.live_pixel_format_name = "Unknown"
+        self.saving_notes_var = tk.StringVar(value="")
         self.live_first_frame_logged = False
         self.live_first_frame_rendered = False
         self.live_watchdog_job = None
@@ -1132,20 +1139,50 @@ class HeraTriggerApp(tk.Tk):
         self._safe_after(250, self.auto_connect_devices)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    def _live_cursor_status_text(self, text):
+        return f"{text:<48}"[:48]
+
     def _configure_theme(self):
-        self.theme = {
-            "bg": "#14181d",
-            "panel": "#1d232a",
-            "panel_alt": "#232a32",
-            "field": "#0f1318",
-            "border": "#3a434d",
-            "text": "#e7edf5",
-            "muted": "#9aa6b2",
-            "accent": "#ff8b3d",
-            "accent_soft": "#ffb37a",
-            "success": "#7ad97a",
-            "danger": "#ff6a6a",
+        palettes = {
+            "dark": {
+                "bg": "#14181d",
+                "panel": "#1d232a",
+                "panel_alt": "#232a32",
+                "field": "#0f1318",
+                "border": "#3a434d",
+                "text": "#e7edf5",
+                "muted": "#9aa6b2",
+                "accent": "#ff8b3d",
+                "accent_soft": "#ffb37a",
+                "success": "#7ad97a",
+                "danger": "#ff6a6a",
+                "canvas": "#101418",
+                "canvas_grid": "#1b2229",
+                "title": "#f3f6fb",
+                "button_text": "#e7edf5",
+                "accent_text": "#111111",
+            },
+            "light": {
+                "bg": "#eef2f6",
+                "panel": "#ffffff",
+                "panel_alt": "#e5ebf2",
+                "field": "#f7f9fc",
+                "border": "#c8d2df",
+                "text": "#16202a",
+                "muted": "#5c6b79",
+                "accent": "#d96f22",
+                "accent_soft": "#a9571d",
+                "success": "#247a3d",
+                "danger": "#ba3030",
+                "canvas": "#f4f7fa",
+                "canvas_grid": "#dde5ee",
+                "title": "#101820",
+                "button_text": "#16202a",
+                "accent_text": "#ffffff",
+            },
         }
+        self.theme = palettes.get(self.theme_mode, palettes["dark"])
+        self.configure(bg=self.theme["bg"])
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
@@ -1170,6 +1207,8 @@ class HeraTriggerApp(tk.Tk):
         self.option_add("*Entry.Foreground", self.theme["text"])
         self.option_add("*Text.Background", self.theme["field"])
         self.option_add("*Text.Foreground", self.theme["text"])
+        if hasattr(self, "theme_button_var"):
+            self.theme_button_var.set("Dark Mode" if self.theme_mode == "light" else "Light Mode")
         self._apply_theme_recursive(self)
 
     def _apply_theme_recursive(self, widget):
@@ -1177,18 +1216,26 @@ class HeraTriggerApp(tk.Tk):
         try:
             if cls in {"Frame", "Labelframe", "LabelFrame", "Toplevel"}:
                 widget.configure(bg=self.theme["panel"], highlightbackground=self.theme["border"], highlightcolor=self.theme["border"])
+            elif cls == "Panedwindow":
+                widget.configure(bg=self.theme["bg"], sashrelief="flat")
+            elif cls == "Canvas":
+                widget.configure(bg=self.theme["canvas"], highlightbackground=self.theme["border"], highlightcolor=self.theme["border"])
             elif cls == "Label":
                 widget.configure(bg=self.theme["panel"], fg=self.theme["text"])
             elif cls == "Button":
-                widget.configure(bg=self.theme["panel_alt"], fg=self.theme["text"], activebackground=self.theme["accent"], activeforeground="#111111", relief="flat", bd=0, padx=10, pady=6, cursor="hand2")
+                widget.configure(bg=self.theme["panel_alt"], fg=self.theme["button_text"], activebackground=self.theme["accent"], activeforeground=self.theme["accent_text"], relief="flat", bd=0, padx=10, pady=6, cursor="hand2")
             elif cls == "Entry":
                 widget.configure(bg=self.theme["field"], fg=self.theme["text"], insertbackground=self.theme["accent_soft"], relief="flat", bd=6)
             elif cls == "Text":
                 widget.configure(bg=self.theme["field"], fg=self.theme["text"], insertbackground=self.theme["accent_soft"], relief="flat", bd=0)
+            elif cls == "Checkbutton":
+                widget.configure(bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"], activebackground=self.theme["panel"], activeforeground=self.theme["text"])
+            elif cls == "Scale":
+                widget.configure(bg=self.theme["panel"], fg=self.theme["text"], troughcolor=self.theme["field"], activebackground=self.theme["accent"], highlightthickness=0)
             elif cls == "Menubutton":
-                widget.configure(bg=self.theme["panel_alt"], fg=self.theme["text"], activebackground=self.theme["accent"], activeforeground="#111111", relief="flat", bd=0, highlightthickness=0)
+                widget.configure(bg=self.theme["panel_alt"], fg=self.theme["button_text"], activebackground=self.theme["accent"], activeforeground=self.theme["accent_text"], relief="flat", bd=0, highlightthickness=0)
                 try:
-                    widget["menu"].configure(bg=self.theme["panel_alt"], fg=self.theme["text"], activebackground=self.theme["accent"], activeforeground="#111111")
+                    widget["menu"].configure(bg=self.theme["panel_alt"], fg=self.theme["text"], activebackground=self.theme["accent"], activeforeground=self.theme["accent_text"])
                 except Exception:
                     pass
         except Exception:
@@ -1197,65 +1244,415 @@ class HeraTriggerApp(tk.Tk):
         for child in widget.winfo_children():
             self._apply_theme_recursive(child)
 
+    def toggle_theme_mode(self):
+        self.theme_mode = "light" if self.theme_mode == "dark" else "dark"
+        self._configure_theme()
+        self._draw_live_view_placeholder()
+        self.render_current_hyper_band()
+
     def _build_ui(self):
-        shell = tk.Frame(self, bg="#14181d")
+        shell = tk.Frame(self, bg=self.theme["bg"])
         shell.pack(fill="both", expand=True, padx=14, pady=14)
 
-        toolbar = tk.Frame(shell, bg="#14181d")
-        toolbar.pack(fill="x", pady=(0, 12))
-        title = tk.Label(toolbar, text="HERA + Tango Trigger", font=("Segoe UI Semibold", 16), bg="#14181d", fg="#f3f6fb")
+        toolbar = tk.Frame(shell, bg=self.theme["bg"])
+        toolbar.pack(fill="x", pady=(0, 8))
+        title = tk.Label(toolbar, text="HERA + Tango Trigger", font=("Segoe UI Semibold", 16), bg=self.theme["bg"], fg=self.theme["title"])
         title.pack(side="left")
-        subtitle = tk.Label(toolbar, text="Stage-guided hyperspectral acquisition", font=("Segoe UI", 10), bg="#14181d", fg="#9aa6b2")
+        subtitle = tk.Label(toolbar, text="Stage-guided hyperspectral acquisition", font=("Segoe UI", 10), bg=self.theme["bg"], fg=self.theme["muted"])
         subtitle.pack(side="left", padx=(12, 0), pady=(4, 0))
-        top_actions = tk.Frame(toolbar, bg="#14181d")
-        top_actions.pack(side="right")
-        tk.Button(top_actions, text="Run Selected Site", command=self.manual_trigger_selected_position).pack(side="left", padx=4)
-        tk.Button(
-            top_actions,
-            text="Start Timelapse",
-            command=self.start_timelapse,
-            bg="#ff8b3d",
-            fg="#111111",
-            activebackground="#ffb37a",
-        ).pack(side="left", padx=4)
-        self.pause_button = tk.Button(top_actions, text="Pause", command=self.pause_or_resume_timelapse)
-        self.pause_button.pack(side="left", padx=4)
-        tk.Button(top_actions, text="Stop Timelapse", command=self.stop_timelapse).pack(side="left", padx=4)
+        tk.Button(toolbar, textvariable=self.theme_button_var, command=self.toggle_theme_mode).pack(side="right")
 
-        body = tk.Frame(shell, bg="#14181d")
+        body = tk.PanedWindow(shell, orient="horizontal", sashwidth=8, sashrelief="flat", bg=self.theme["bg"], bd=0)
         body.pack(fill="both", expand=True)
-        body.grid_columnconfigure(0, weight=0)
-        body.grid_columnconfigure(1, weight=1)
-        body.grid_columnconfigure(2, weight=0)
-        body.grid_rowconfigure(0, weight=1)
 
-        left_outer = tk.Frame(body, bg="#14181d")
-        left_outer.grid(row=0, column=0, sticky="nsw")
-        left_scroll = ttk.Scrollbar(left_outer, orient="vertical")
-        left_scroll.pack(side="right", fill="y")
-        left_canvas = tk.Canvas(
-            left_outer, bg="#14181d", highlightthickness=0,
-            width=355, yscrollcommand=left_scroll.set,
+        left = self._make_scroll_column(body, width=330)
+        body.add(left, minsize=260, width=330, stretch="never")
+
+        center = tk.Frame(body, bg=self.theme["bg"], padx=10)
+        center.grid_rowconfigure(1, weight=1)
+        center.grid_columnconfigure(0, weight=1)
+        body.add(center, minsize=560, stretch="always")
+
+        right = self._make_scroll_column(body, width=315)
+        body.add(right, minsize=245, width=315, stretch="never")
+
+        self._build_left_controls(left.content)
+        self._build_center_workspace(center)
+        self._build_right_controls(right.content)
+
+    def _make_scroll_column(self, parent, width):
+        outer = tk.Frame(parent, bg=self.theme["bg"])
+        scroll = ttk.Scrollbar(outer, orient="vertical")
+        scroll.pack(side="right", fill="y")
+        canvas = tk.Canvas(outer, bg=self.theme["bg"], highlightthickness=0, width=width, yscrollcommand=scroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scroll.config(command=canvas.yview)
+        content = tk.Frame(canvas, bg=self.theme["bg"])
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(window_id, width=e.width))
+
+        def bind_wheel(_event):
+            canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+
+        canvas.bind("<Enter>", bind_wheel)
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+        outer.content = content
+        return outer
+
+    def _param_entry(self, parent, row, label_text, key, default, width=10):
+        tk.Label(parent, text=label_text).grid(row=row, column=0, sticky="w", pady=2)
+        if isinstance(default, int):
+            self.param_vars[key] = tk.IntVar(value=default)
+        else:
+            self.param_vars[key] = tk.DoubleVar(value=default)
+        tk.Entry(parent, textvariable=self.param_vars[key], width=width).grid(row=row, column=1, sticky="ew", padx=(6, 0), pady=2)
+
+    def _param_menu(self, parent, row, label_text, key, default, options):
+        tk.Label(parent, text=label_text).grid(row=row, column=0, sticky="w", pady=2)
+        self.param_vars[key] = tk.StringVar(value=default)
+        tk.OptionMenu(parent, self.param_vars[key], *list(options)).grid(row=row, column=1, sticky="ew", padx=(6, 0), pady=2)
+
+    def _build_left_controls(self, parent):
+        self.param_vars = {}
+        self.stage_speed_var = tk.DoubleVar(value=20.0)
+        self.stage_dwell_var = tk.DoubleVar(value=0.0)
+        self.live_pixel_size_var = tk.DoubleVar(value=1.0)
+        self.live_invert_x_var = tk.BooleanVar(value=False)
+        self.live_invert_y_var = tk.BooleanVar(value=False)
+        self.live_swap_xy_var = tk.BooleanVar(value=False)
+        self.position_name_var = tk.StringVar()
+        self.selected_name_var = tk.StringVar()
+        self.selected_x_var = tk.StringVar()
+        self.selected_y_var = tk.StringVar()
+        self.selected_z_var = tk.StringVar()
+        self.roi_tl_x_var = tk.IntVar(value=0)
+        self.roi_tl_y_var = tk.IntVar(value=0)
+        self.roi_tr_x_var = tk.IntVar(value=511)
+        self.roi_tr_y_var = tk.IntVar(value=0)
+        self.roi_br_x_var = tk.IntVar(value=511)
+        self.roi_br_y_var = tk.IntVar(value=511)
+        self.roi_bl_x_var = tk.IntVar(value=0)
+        self.roi_bl_y_var = tk.IntVar(value=511)
+        self.roi_area_var = tk.StringVar(value=str(512 * 512))
+
+        status = tk.LabelFrame(parent, text="Status", padx=8, pady=8)
+        status.pack(fill="x", pady=(0, 10))
+        for text, var in (
+            ("License", self.license_var),
+            ("Live", self.live_view_status_var),
+            ("NIS Z", self.nis_z_status_var),
+            ("Site", self.current_site_var),
+            ("Cycle", self.current_cycle_var),
+            ("Last export", self.last_export_var),
+        ):
+            row = tk.Frame(status)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=f"{text}:", fg=self.theme["muted"], width=10, anchor="w").pack(side="left")
+            tk.Label(row, textvariable=var, anchor="w", wraplength=210, justify="left").pack(side="left", fill="x", expand=True)
+        cursor_row = tk.Frame(status)
+        cursor_row.pack(fill="x", pady=1)
+        tk.Label(cursor_row, text="Cursor:", fg=self.theme["muted"], width=10, anchor="w").pack(side="left")
+        tk.Label(
+            cursor_row,
+            textvariable=self.live_cursor_var,
+            anchor="w",
+            width=48,
+            justify="left",
+            font=("Consolas", 9),
+        ).pack(side="left", fill="x", expand=True)
+        state_row = tk.Frame(status)
+        state_row.pack(fill="x", pady=(4, 0))
+        self.app_state_var = tk.StringVar(value=self.app_state)
+        tk.Label(state_row, text="State:", fg=self.theme["muted"], width=10, anchor="w").pack(side="left")
+        self.app_state_label = tk.Label(state_row, textvariable=self.app_state_var, fg="#7ad97a", font=("Segoe UI Semibold", 10))
+        self.app_state_label.pack(side="left", fill="x", expand=True)
+        btns = tk.Frame(status)
+        btns.pack(fill="x", pady=(8, 0))
+        tk.Button(btns, text="Preflight", command=self.preflight_check).pack(side="left", padx=(0, 6))
+        tk.Button(btns, text="Live Status", command=self.debug_live_status).pack(side="left", padx=(0, 6))
+        tk.Button(btns, text="Restart Live", command=self.restart_live_view).pack(side="left")
+
+        exposure = tk.LabelFrame(parent, text="Exposure", padx=8, pady=8)
+        exposure.pack(fill="x", pady=(0, 10))
+        exposure.grid_columnconfigure(1, weight=1)
+        self._param_entry(exposure, 0, "Gain level (0-1):", "gain", 0.5)
+        self._param_entry(exposure, 1, "Exposure (ms):", "exposure", 1.0)
+        tk.Button(exposure, text="Apply Parameters", command=self.apply_parameters_async).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
+        roi = tk.LabelFrame(parent, text="Region Of Interest", padx=8, pady=8)
+        roi.pack(fill="x", pady=(0, 10))
+        roi.grid_columnconfigure(1, weight=1)
+        self._param_entry(roi, 0, "ROI X:", "roi_x", 0)
+        self._param_entry(roi, 1, "ROI Y:", "roi_y", 0)
+        self._param_entry(roi, 2, "ROI Width:", "roi_w", 512)
+        self._param_entry(roi, 3, "ROI Height:", "roi_h", 512)
+        corners = tk.LabelFrame(roi, text="Corners", padx=6, pady=6)
+        corners.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        corner_rows = [
+            ("Top left", self.roi_tl_x_var, self.roi_tl_y_var),
+            ("Top right", self.roi_tr_x_var, self.roi_tr_y_var),
+            ("Bottom right", self.roi_br_x_var, self.roi_br_y_var),
+            ("Bottom left", self.roi_bl_x_var, self.roi_bl_y_var),
+        ]
+        for corner_row, (label, x_var, y_var) in enumerate(corner_rows):
+            tk.Label(corners, text=label).grid(row=corner_row, column=0, sticky="w", pady=1)
+            tk.Label(corners, text="X").grid(row=corner_row, column=1, sticky="e", padx=(6, 2))
+            tk.Entry(corners, textvariable=x_var, width=7).grid(row=corner_row, column=2, sticky="w")
+            tk.Label(corners, text="Y").grid(row=corner_row, column=3, sticky="e", padx=(6, 2))
+            tk.Entry(corners, textvariable=y_var, width=7).grid(row=corner_row, column=4, sticky="w")
+        tk.Button(corners, text="Use Corners", command=self.apply_roi_from_corners).grid(row=4, column=0, columnspan=5, sticky="ew", pady=(6, 0))
+        area_row = tk.Frame(roi)
+        area_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        tk.Label(area_row, text="Area (px2)").pack(side="left")
+        tk.Entry(area_row, textvariable=self.roi_area_var, width=9).pack(side="left", padx=(6, 4))
+        tk.Button(area_row, text="Set Area", command=self.apply_roi_from_area).pack(side="left")
+        roi_actions = tk.Frame(roi)
+        roi_actions.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        tk.Button(roi_actions, text="Use Size", command=self.apply_roi_from_size).pack(side="left", padx=(0, 4))
+        tk.Button(roi_actions, textvariable=self.live_roi_button_var, command=self.toggle_live_roi_selection).pack(side="left", padx=(0, 4))
+        tk.Button(roi_actions, text="Clear", command=self.clear_live_roi_selection).pack(side="left")
+        tk.Label(roi, textvariable=self.live_roi_status_var, fg=self.theme["muted"], wraplength=250, justify="left").grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        xyz = tk.LabelFrame(parent, text="XYZ Position", padx=8, pady=8)
+        xyz.pack(fill="x", pady=(0, 10))
+        xyz.grid_columnconfigure(0, weight=1)
+        self.stage_status_var = tk.StringVar(value="Stage: not connected")
+        self.stage_version_var = tk.StringVar(value="Controller: -")
+        self.stage_position_var = tk.StringVar(value="X: -, Y: -")
+        tk.Label(xyz, textvariable=self.stage_status_var, font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        pos_panel = tk.Frame(xyz)
+        pos_panel.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        self.current_x_label = tk.Label(pos_panel, text="X: -")
+        self.current_x_label.pack(anchor="w")
+        self.current_y_label = tk.Label(pos_panel, text="Y: -")
+        self.current_y_label.pack(anchor="w", pady=(4, 0))
+        self.current_z_label = tk.Label(pos_panel, textvariable=self.nis_z_current_z_var)
+        self.current_z_label.pack(anchor="w", pady=(4, 0))
+
+        map_panel = tk.Frame(xyz)
+        map_panel.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        pixel_row = tk.Frame(map_panel)
+        pixel_row.pack(fill="x")
+        tk.Label(pixel_row, text="Stage units / pixel").pack(side="left")
+        tk.Entry(pixel_row, textvariable=self.live_pixel_size_var, width=8).pack(side="left", padx=(6, 0))
+        axis_row = tk.Frame(map_panel)
+        axis_row.pack(fill="x", pady=(6, 0))
+        tk.Checkbutton(axis_row, text="Invert X", variable=self.live_invert_x_var, command=self._update_live_cursor_readout).pack(side="left")
+        tk.Checkbutton(axis_row, text="Invert Y", variable=self.live_invert_y_var, command=self._update_live_cursor_readout).pack(side="left", padx=(6, 0))
+        tk.Checkbutton(axis_row, text="Swap XY", variable=self.live_swap_xy_var, command=self._update_live_cursor_readout).pack(side="left", padx=(6, 0))
+
+        position_panel = tk.Frame(xyz)
+        position_panel.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        tk.Label(position_panel, text="Position name").pack(anchor="w")
+        tk.Entry(position_panel, textvariable=self.position_name_var, width=24).pack(fill="x", pady=(2, 6))
+        for text, command in (
+            ("Add Current Position", self.add_current_position),
+            ("Update Selected Position", self.update_selected_position),
+            ("Delete Selected Row", self.delete_selected_position),
+            ("Reconnect Stage", self.reconnect_stage),
+        ):
+            tk.Button(position_panel, text=text, command=command).pack(fill="x", pady=2)
+
+        edit_panel = tk.LabelFrame(parent, text="Selected XYZ Site", padx=8, pady=8)
+        edit_panel.pack(fill="x", pady=(0, 10))
+        tk.Entry(edit_panel, textvariable=self.selected_name_var, width=24).pack(fill="x", pady=(0, 6))
+        tk.Button(edit_panel, text="Rename", command=self.rename_selected_position).pack(fill="x", pady=(0, 6))
+        coord_row = tk.Frame(edit_panel)
+        coord_row.pack(fill="x")
+        for label, var in (("X", self.selected_x_var), ("Y", self.selected_y_var), ("Z", self.selected_z_var)):
+            tk.Label(coord_row, text=label).pack(side="left")
+            tk.Entry(coord_row, textvariable=var, width=8).pack(side="left", padx=(3, 6))
+        tk.Button(edit_panel, text="Use Current XYZ", command=self.capture_current_stage_position_into_selected).pack(fill="x", pady=(8, 2))
+        tk.Button(edit_panel, text="Save Selected Edits", command=self.apply_selected_position_edits).pack(fill="x", pady=2)
+        tk.Button(edit_panel, text="Go To Selected Position", command=self.goto_selected_position).pack(fill="x", pady=2)
+
+        saved = tk.LabelFrame(parent, text="Saved Positions", padx=8, pady=8)
+        saved.pack(fill="both", expand=True, pady=(0, 10))
+        tree_wrap = tk.Frame(saved)
+        tree_wrap.pack(fill="both", expand=True)
+        self.positions_tree = ttk.Treeview(tree_wrap, columns=("name", "x", "y", "z"), show="headings", height=8, style="Dark.Treeview")
+        for name, label, width, anchor in (
+            ("name", "Name", 105, "w"),
+            ("x", "X", 58, "e"),
+            ("y", "Y", 58, "e"),
+            ("z", "Z", 58, "e"),
+        ):
+            self.positions_tree.heading(name, text=label)
+            self.positions_tree.column(name, width=width, anchor=anchor)
+        scroll = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.positions_tree.yview)
+        self.positions_tree.configure(yscrollcommand=scroll.set)
+        self.positions_tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.positions_tree.bind("<<TreeviewSelect>>", self.on_position_selected)
+
+        self._build_nis_z_ui(parent)
+
+    def _build_center_workspace(self, parent):
+        spectral = tk.LabelFrame(parent, text="Spectral / Hypercube Settings", padx=8, pady=8)
+        spectral.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        for col in range(12):
+            spectral.grid_columnconfigure(col, weight=1)
+        self.param_vars["scan_mode"] = tk.StringVar(value="Medium")
+        self.param_vars["trigger_mode"] = tk.StringVar(value="Internal")
+        self.param_vars["averages"] = tk.IntVar(value=1)
+        self.param_vars["stabilization"] = tk.IntVar(value=0)
+        self.param_vars["bands"] = tk.IntVar(value=0)
+        self.param_vars["binning"] = tk.StringVar(value="None")
+        self.param_vars["data_type"] = tk.StringVar(value="SinglePrecision")
+        controls = [
+            ("Resolution", "scan_mode", "menu", self.SCAN_MODES.keys(), 8),
+            ("Bands", "bands", "entry", None, 5),
+            ("Avg", "averages", "entry", None, 4),
+            ("Binning", "binning", "menu", self.BINNING_OPTIONS.keys(), 7),
+            ("Stabilize ms", "stabilization", "entry", None, 6),
+            ("Data", "data_type", "menu", self.DATA_TYPES.keys(), 13),
+        ]
+        for index, (label, key, kind, options, width) in enumerate(controls):
+            col = index * 2
+            tk.Label(spectral, text=label).grid(row=0, column=col, sticky="w", padx=(0, 3), pady=2)
+            if kind == "menu":
+                menu = tk.OptionMenu(spectral, self.param_vars[key], *list(options))
+                menu.config(width=width)
+                menu.grid(row=0, column=col + 1, sticky="w", padx=(0, 8), pady=2)
+            else:
+                tk.Entry(spectral, textvariable=self.param_vars[key], width=width).grid(row=0, column=col + 1, sticky="w", padx=(0, 8), pady=2)
+
+        self._build_views_and_log(parent)
+
+    def _build_views_and_log(self, parent):
+        views_frame = tk.LabelFrame(parent, text="Live And Hyperspectral Views", padx=8, pady=8)
+        views_frame.grid(row=1, column=0, sticky="nsew")
+        views_frame.grid_rowconfigure(0, weight=1)
+        views_frame.grid_columnconfigure(0, weight=1)
+        notebook = ttk.Notebook(views_frame)
+        notebook.grid(row=0, column=0, sticky="nsew")
+
+        live_tab = tk.Frame(notebook, bg=self.theme["panel"])
+        hyper_tab = tk.Frame(notebook, bg=self.theme["panel"])
+        notebook.add(live_tab, text="Live View")
+        notebook.add(hyper_tab, text="Hyperspectral View")
+
+        live_controls = tk.Frame(live_tab, bg=self.theme["panel"])
+        live_controls.pack(fill="x", padx=8, pady=(8, 4))
+        live_display_bar = tk.Frame(live_controls, bg=self.theme["panel"])
+        live_display_bar.pack(fill="x")
+        tk.Checkbutton(live_display_bar, text="Auto Contrast", variable=self.live_autocontrast_var,
+                       command=lambda: self._schedule_live_render(force=True),
+                       bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
+                       activebackground=self.theme["panel"]).pack(side="left", padx=(12, 0))
+        tk.Checkbutton(live_display_bar, text="Show Saturation", variable=self.live_show_saturation_var,
+                       command=lambda: self._schedule_live_render(force=True),
+                       bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
+                       activebackground=self.theme["panel"]).pack(side="left", padx=(8, 0))
+        tk.Label(live_display_bar, textvariable=self.live_gamma_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(10, 4))
+        tk.Scale(live_display_bar, variable=self.live_gamma_var, from_=0.2, to=3.0, resolution=0.1,
+                 orient="horizontal", length=110, showvalue=False, command=self.on_live_gamma_change,
+                 bg=self.theme["panel"], fg=self.theme["text"], troughcolor=self.theme["field"],
+                 highlightthickness=0).pack(side="left")
+        tk.Button(live_display_bar, text="Reset Gamma", command=self.reset_live_gamma).pack(side="left", padx=(6, 0))
+        tk.Button(live_display_bar, text="Snapshot", command=self.snapshot_live_view).pack(side="left", padx=(8, 0))
+        tk.Label(live_display_bar, textvariable=self.live_zoom_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(12, 4))
+        tk.Button(live_display_bar, text="-", width=3, command=lambda: self.zoom_live_view(1 / 1.25)).pack(side="left")
+        tk.Button(live_display_bar, text="Fit", command=self.fit_live_view).pack(side="left", padx=(6, 0))
+        tk.Button(live_display_bar, text="+", width=3, command=lambda: self.zoom_live_view(1.25)).pack(side="left", padx=(6, 0))
+        self.live_view_canvas = tk.Canvas(live_tab, bg=self.theme["canvas"], highlightthickness=0)
+        self.live_view_canvas.bind("<Motion>", self.on_live_mouse_move)
+        self.live_view_canvas.bind("<Button-1>", self.on_live_mouse_click)
+        self.live_view_canvas.bind("<MouseWheel>", self.on_live_mousewheel)
+        self.live_view_canvas.bind("<Button-4>", lambda event: self.zoom_live_view(1.25, event))
+        self.live_view_canvas.bind("<Button-5>", lambda event: self.zoom_live_view(1 / 1.25, event))
+        self.live_view_canvas.bind("<ButtonPress-3>", self.start_live_pan)
+        self.live_view_canvas.bind("<B3-Motion>", self.on_live_pan_drag)
+        self.live_view_canvas.bind("<ButtonRelease-3>", self.end_live_pan)
+        self.live_view_canvas.bind("<Leave>", self.on_live_mouse_leave)
+        self.live_view_canvas.pack(fill="both", expand=True)
+
+        hyper_controls = tk.Frame(hyper_tab, bg=self.theme["panel"])
+        hyper_controls.pack(fill="x", padx=8, pady=(8, 4))
+        tk.Button(hyper_controls, text="Prev Band", command=lambda: self.step_hyper_band(-1)).pack(side="left", padx=(0, 8))
+        tk.Label(hyper_controls, textvariable=self.current_hyper_band_var, fg="#e7edf5").pack(side="left")
+        ttk.Separator(hyper_controls, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=12)
+        tk.Label(hyper_controls, textvariable=self.current_hyper_wavelength_var, fg="#9aa6b2").pack(side="left")
+        jump_wrap = tk.Frame(hyper_controls, bg=self.theme["panel"])
+        jump_wrap.pack(side="right", padx=(8, 0))
+        tk.Button(jump_wrap, text="Go", command=self.jump_to_hyper_band).pack(side="right")
+        tk.Entry(jump_wrap, textvariable=self.hyper_band_jump_var, width=6).pack(side="right", padx=(0, 6))
+        tk.Label(jump_wrap, text="Band", fg="#9aa6b2").pack(side="right", padx=(0, 6))
+        tk.Button(hyper_controls, text="Next Band", command=lambda: self.step_hyper_band(1)).pack(side="right")
+        self.hyper_band_scale = tk.Scale(
+            hyper_tab, from_=0, to=0, orient="horizontal", variable=self.current_hyper_band_index,
+            command=self.on_hyper_band_changed, showvalue=False, highlightthickness=0, bd=0,
+            bg=self.theme["panel"], fg=self.theme["text"], troughcolor=self.theme["panel_alt"],
+            activebackground=self.theme["accent"], sliderlength=28, width=18, repeatdelay=150,
+            repeatinterval=80, takefocus=1, cursor="hand2",
         )
-        left_canvas.pack(side="left", fill="both", expand=True)
-        left_scroll.config(command=left_canvas.yview)
-        left = tk.Frame(left_canvas, bg="#14181d")
-        left_win = left_canvas.create_window((0, 0), window=left, anchor="nw")
-        left.bind("<Configure>", lambda _e: left_canvas.configure(scrollregion=left_canvas.bbox("all")))
-        left_canvas.bind("<Configure>", lambda e: left_canvas.itemconfig(left_win, width=e.width))
-        left_canvas.bind("<Enter>", lambda _e: left_canvas.bind_all(
-            "<MouseWheel>", lambda e: left_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")))
-        left_canvas.bind("<Leave>", lambda _e: left_canvas.unbind_all("<MouseWheel>"))
+        self.hyper_band_scale.pack(fill="x", padx=8, pady=(0, 6))
+        self.hyper_view_canvas = tk.Canvas(hyper_tab, bg=self.theme["canvas"], highlightthickness=0)
+        self.hyper_view_canvas.pack(fill="both", expand=True)
+        self.live_view_canvas.bind("<Configure>", lambda _e: self._draw_live_view_placeholder())
+        self.hyper_view_canvas.bind("<Configure>", lambda _e: self.render_current_hyper_band())
+        for widget in (hyper_tab, self.hyper_band_scale, self.hyper_view_canvas):
+            widget.bind("<Left>", lambda _e: self.step_hyper_band(-1))
+            widget.bind("<Right>", lambda _e: self.step_hyper_band(1))
+            widget.bind("<MouseWheel>", self.on_hyper_mousewheel)
+            widget.bind("<Button-4>", lambda _e: self.step_hyper_band(1))
+            widget.bind("<Button-5>", lambda _e: self.step_hyper_band(-1))
+            widget.bind("<Button-1>", lambda _e, target=widget: target.focus_set(), add="+")
 
-        center = tk.Frame(body, bg="#14181d")
-        center.grid(row=0, column=1, sticky="nsew", padx=12)
-        right = tk.Frame(body, bg="#14181d")
-        right.grid(row=0, column=2, sticky="nse")
+        status_frame = tk.LabelFrame(parent, text="Status / Messages", padx=8, pady=8)
+        status_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        status_strip = tk.Frame(status_frame)
+        status_strip.pack(fill="x", pady=(0, 6))
+        tk.Label(status_strip, textvariable=self.timelapse_status_var, font=("Segoe UI Semibold", 10)).pack(side="left")
+        ttk.Separator(status_strip, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=12)
+        tk.Label(status_strip, textvariable=self.time_remaining_var, fg="#9aa6b2").pack(side="left")
+        ttk.Separator(status_strip, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=12)
+        tk.Label(status_strip, textvariable=self.live_view_status_var, fg="#9aa6b2").pack(side="left")
+        self.log_text = tk.Text(status_frame, height=7, state="disabled", wrap="word", bg=self.theme["field"], fg=self.theme["text"], insertbackground=self.theme["accent_soft"], relief="flat")
+        self.log_text.pack(fill="x", expand=False)
 
-        self._build_tango_ui(left)
-        self._build_nis_z_ui(left)
-        self._build_log_ui(center)
-        self._build_hera_ui(right)
+    def _build_right_controls(self, parent):
+        acquisition = tk.LabelFrame(parent, text="Acquisition / Timelapse", padx=8, pady=8)
+        acquisition.pack(fill="x", pady=(0, 10))
+        tk.Button(acquisition, text="Run Selected Site", command=self.manual_trigger_selected_position).pack(fill="x", pady=3)
+        tk.Button(acquisition, text="Start Hera Acquisition", command=self.start_acquisition).pack(fill="x", pady=3)
+        tk.Button(acquisition, text="Abort Hera Acquisition", command=self.abort_acquisition).pack(fill="x", pady=3)
+        ttk.Separator(acquisition, orient="horizontal", style="Dark.TSeparator").pack(fill="x", pady=8)
+
+        self.interval_var = tk.DoubleVar(value=10.0)
+        self.stop_after_var = tk.DoubleVar(value=0.0)
+        for label, var in (
+            ("Trigger", self.param_vars["trigger_mode"]),
+            ("Interval (min)", self.interval_var),
+            ("Dwell (s)", self.stage_dwell_var),
+            ("Stop after (min)", self.stop_after_var),
+            ("Speed XY", self.stage_speed_var),
+        ):
+            row = tk.Frame(acquisition)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=label, width=15, anchor="w").pack(side="left")
+            if label == "Trigger":
+                menu = tk.OptionMenu(row, var, *list(self.TRIGGER_MODES.keys()))
+                menu.config(width=10)
+                menu.pack(side="left")
+            else:
+                tk.Entry(row, textvariable=var, width=9).pack(side="left")
+        tk.Label(acquisition, textvariable=self.timelapse_status_var, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(8, 0))
+        tk.Label(acquisition, textvariable=self.time_remaining_var).pack(anchor="w", pady=(2, 8))
+        tk.Button(acquisition, text="Start Timelapse", command=self.start_timelapse, bg="#ff8b3d", fg="#111111", activebackground="#ffb37a").pack(fill="x", pady=3)
+        self.pause_button = tk.Button(acquisition, text="Pause", command=self.pause_or_resume_timelapse)
+        self.pause_button.pack(fill="x", pady=3)
+        tk.Button(acquisition, text="Stop Timelapse", command=self.stop_timelapse).pack(fill="x", pady=3)
+
+        saving = tk.LabelFrame(parent, text="Saving", padx=8, pady=8)
+        saving.pack(fill="x", pady=(0, 10))
+        self.param_vars["output_path"] = tk.StringVar(value=os.path.join(os.path.abspath(os.path.dirname(__file__)), "output"))
+        tk.Label(saving, text="Output path").pack(anchor="w")
+        tk.Entry(saving, textvariable=self.param_vars["output_path"], width=30).pack(fill="x", pady=(2, 6))
+        tk.Button(saving, text="Browse", command=self.browse_output_path).pack(fill="x", pady=(0, 6))
+        tk.Label(saving, text="Notes saved in ENVI description").pack(anchor="w", pady=(4, 0))
+        tk.Entry(saving, textvariable=self.saving_notes_var, width=30).pack(fill="x", pady=(2, 0))
 
     def _build_hera_ui(self, parent):
         frame = tk.LabelFrame(parent, text="Hera Acquisition", padx=8, pady=8)
@@ -1277,7 +1674,7 @@ class HeraTriggerApp(tk.Tk):
 
         param_labels = [
             ("Gain level (0-1):", "gain", 0.5),
-            ("Exposure (ms):", "exposure", 10.0),
+            ("Exposure (ms):", "exposure", 1.0),
             ("ROI X:", "roi_x", 0),
             ("ROI Y:", "roi_y", 0),
             ("ROI Width:", "roi_w", 512),
@@ -1515,6 +1912,14 @@ class HeraTriggerApp(tk.Tk):
         tk.Button(live_display_bar, text="Reset Gamma", command=self.reset_live_gamma).pack(side="left", padx=(6, 0))
         tk.Button(live_display_bar, text="Snapshot", command=self.snapshot_live_view).pack(side="left", padx=(8, 0))
 
+        live_zoom_bar = tk.Frame(live_controls, bg=self.theme["panel"])
+        live_zoom_bar.pack(fill="x", pady=(4, 0))
+        tk.Label(live_zoom_bar, textvariable=self.live_zoom_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(12, 4))
+        tk.Button(live_zoom_bar, text="-", width=3, command=lambda: self.zoom_live_view(1 / 1.25)).pack(side="left")
+        tk.Button(live_zoom_bar, text="Fit", command=self.fit_live_view).pack(side="left", padx=(6, 0))
+        tk.Button(live_zoom_bar, text="+", width=3, command=lambda: self.zoom_live_view(1.25)).pack(side="left", padx=(6, 0))
+        tk.Label(live_zoom_bar, text="Mouse wheel zoom; right-drag pan", fg="#728091", bg=self.theme["panel"]).pack(side="left", padx=(10, 0))
+
         live_roi_bar = tk.Frame(live_controls, bg=self.theme["panel"])
         live_roi_bar.pack(fill="x", pady=(4, 0))
         tk.Button(live_roi_bar, textvariable=self.live_roi_button_var, command=self.toggle_live_roi_selection).pack(side="right")
@@ -1524,6 +1929,12 @@ class HeraTriggerApp(tk.Tk):
         self.live_view_canvas = tk.Canvas(live_tab, bg="#101418", highlightthickness=0)
         self.live_view_canvas.bind("<Motion>", self.on_live_mouse_move)
         self.live_view_canvas.bind("<Button-1>", self.on_live_mouse_click)
+        self.live_view_canvas.bind("<MouseWheel>", self.on_live_mousewheel)
+        self.live_view_canvas.bind("<Button-4>", lambda event: self.zoom_live_view(1.25, event))
+        self.live_view_canvas.bind("<Button-5>", lambda event: self.zoom_live_view(1 / 1.25, event))
+        self.live_view_canvas.bind("<ButtonPress-3>", self.start_live_pan)
+        self.live_view_canvas.bind("<B3-Motion>", self.on_live_pan_drag)
+        self.live_view_canvas.bind("<ButtonRelease-3>", self.end_live_pan)
         self.live_view_canvas.bind("<Leave>", self.on_live_mouse_leave)
         self.live_view_canvas.pack(fill="both", expand=True)
         hyper_controls = tk.Frame(hyper_tab, bg=self.theme["panel"])
@@ -2135,7 +2546,7 @@ class HeraTriggerApp(tk.Tk):
             self.live_render_pending = False
             self.last_live_render_time = 0.0
         self.live_photo = None
-        self.live_cursor_var.set("Live cursor: -")
+        self.live_cursor_var.set(self._live_cursor_status_text("-"))
         self.live_first_frame_rendered = False
         self.live_auth_warning_logged = False
         self.last_live_decode_error = ""
@@ -2396,6 +2807,11 @@ class HeraTriggerApp(tk.Tk):
             else:
                 actual_roi = self.controller.get_roi()
                 self._log_async(f"ROI is read-only on this device. Current ROI: {actual_roi}")
+            try:
+                actual_x, actual_y, actual_w, actual_h = actual_roi
+                self._safe_after(0, lambda x=actual_x, y=actual_y, w=actual_w, h=actual_h: self._set_roi_fields(x, y, w, h, update_live=True))
+            except Exception:
+                pass
 
             if bands == 0:
                 bands = self.controller.get_default_output_bands(scan_mode)
@@ -3013,6 +3429,9 @@ class HeraTriggerApp(tk.Tk):
             export_tag = self.pending_export_tag or self._sanitize_export_tag(time.strftime("hera_hypercube_%Y%m%d_%H%M%S"))
             output_path = os.path.join(output_dir, export_tag)
             description = "Generated by AppHeraTriggerPython0417 using Hera SDK and Tango stage control"
+            notes = self.saving_notes_var.get().strip()
+            if notes:
+                description = f"{description}\nUser notes: {notes}"
             self.controller.export_hypercube_envi(hypercube_handle, output_path, description)
             hdr_path = self._wait_for_export_files(output_path)
             self.last_export_path = hdr_path
@@ -3075,6 +3494,95 @@ class HeraTriggerApp(tk.Tk):
         out_w = max(1, int(src_width * scale))
         out_h = max(1, int(src_height * scale))
         return out_w, out_h
+
+    def _clamp_live_pan(self, canvas_width=None, canvas_height=None, image_width=None, image_height=None):
+        if not hasattr(self, "live_view_canvas"):
+            return
+        canvas = self.live_view_canvas
+        canvas_width = max(canvas_width if canvas_width is not None else canvas.winfo_width(), 10)
+        canvas_height = max(canvas_height if canvas_height is not None else canvas.winfo_height(), 10)
+        image_width = max(image_width if image_width is not None else 1, 1)
+        image_height = max(image_height if image_height is not None else 1, 1)
+
+        if image_width <= canvas_width:
+            self.live_pan_x = 0.0
+        else:
+            max_pan_x = (image_width - canvas_width) / 2
+            self.live_pan_x = max(-max_pan_x, min(max_pan_x, self.live_pan_x))
+
+        if image_height <= canvas_height:
+            self.live_pan_y = 0.0
+        else:
+            max_pan_y = (image_height - canvas_height) / 2
+            self.live_pan_y = max(-max_pan_y, min(max_pan_y, self.live_pan_y))
+
+    def _update_live_zoom_label(self):
+        self.live_zoom_label_var.set(f"Zoom {int(round(self.live_zoom_factor * 100))}%")
+
+    def zoom_live_view(self, factor, event=None):
+        old_zoom = self.live_zoom_factor
+        new_zoom = max(1.0, min(8.0, old_zoom * factor))
+        if abs(new_zoom - old_zoom) < 0.001:
+            return
+
+        if event is not None:
+            with self.live_frame_lock:
+                frame = self.latest_live_frame
+                rect = self.live_display_rect
+            if frame and rect:
+                src_width, src_height = frame[0], frame[1]
+                canvas = self.live_view_canvas
+                canvas_width = max(canvas.winfo_width(), 10)
+                canvas_height = max(canvas.winfo_height(), 10)
+                old_left, old_top, old_w, old_h = rect
+                if old_w > 0 and old_h > 0:
+                    rel_x = (event.x - old_left) / old_w
+                    rel_y = (event.y - old_top) / old_h
+                    base_w, base_h = self._fit_dimensions(src_width, src_height, max(canvas_width - 16, 1), max(canvas_height - 16, 1))
+                    new_w = max(1, int(round(base_w * new_zoom)))
+                    new_h = max(1, int(round(base_h * new_zoom)))
+                    centered_left = (canvas_width - new_w) / 2
+                    centered_top = (canvas_height - new_h) / 2
+                    self.live_pan_x = event.x - rel_x * new_w - centered_left
+                    self.live_pan_y = event.y - rel_y * new_h - centered_top
+                    self._clamp_live_pan(canvas_width, canvas_height, new_w, new_h)
+
+        self.live_zoom_factor = new_zoom
+        self._update_live_zoom_label()
+        self._schedule_live_render(force=True)
+
+    def fit_live_view(self):
+        self.live_zoom_factor = 1.0
+        self.live_pan_x = 0.0
+        self.live_pan_y = 0.0
+        self.live_pan_drag_start = None
+        self._update_live_zoom_label()
+        self._schedule_live_render(force=True)
+
+    def on_live_mousewheel(self, event):
+        if event.delta > 0:
+            self.zoom_live_view(1.25, event)
+        elif event.delta < 0:
+            self.zoom_live_view(1 / 1.25, event)
+
+    def start_live_pan(self, event):
+        self.live_pan_drag_start = (event.x, event.y, self.live_pan_x, self.live_pan_y)
+
+    def on_live_pan_drag(self, event):
+        if not self.live_pan_drag_start:
+            return
+        start_x, start_y, pan_x, pan_y = self.live_pan_drag_start
+        self.live_pan_x = pan_x + event.x - start_x
+        self.live_pan_y = pan_y + event.y - start_y
+        with self.live_frame_lock:
+            rect = self.live_display_rect
+        if rect:
+            _, _, out_w, out_h = rect
+            self._clamp_live_pan(image_width=out_w, image_height=out_h)
+        self._schedule_live_render(force=True)
+
+    def end_live_pan(self, _event=None):
+        self.live_pan_drag_start = None
 
     def _live_preview_scale(self, width):
         target_w = min(width, self.live_max_preview_width)
@@ -3413,14 +3921,14 @@ class HeraTriggerApp(tk.Tk):
                 max(width - 16, 1),
                 max(height - 16, 1),
             )
-            canvas.create_rectangle(0, 0, width, height, fill="#101418", outline="")
+            canvas.create_rectangle(0, 0, width, height, fill=self.theme["canvas"], outline="")
             canvas.create_image(width / 2, height / 2, image=self.hyper_photo, anchor="center")
             canvas.create_text(
                 12,
                 12,
                 anchor="nw",
                 text=f"{self.current_hypercube_info['width']} x {self.current_hypercube_info['height']}",
-                fill="#e7edf5",
+                fill=self.theme["text"],
                 font=("Segoe UI", 9),
             )
             self.current_hyper_band_var.set(f"Band: {band_index + 1} / {self.current_hypercube_info['bands']}")
@@ -3442,19 +3950,17 @@ class HeraTriggerApp(tk.Tk):
             self.live_display_rect = None
             self.live_display_frame_size = None
             self.live_cursor_image_xy = None
-        self.live_cursor_var.set("Live cursor: -")
+        self.live_cursor_var.set(self._live_cursor_status_text("-"))
         width = max(canvas.winfo_width(), 10)
         height = max(canvas.winfo_height(), 10)
-        canvas.create_rectangle(0, 0, width, height, fill="#101418", outline="")
+        canvas.create_rectangle(0, 0, width, height, fill=self.theme["canvas"], outline="")
         step = 24
         for x in range(0, width, step):
-            canvas.create_line(x, 0, x, height, fill="#1b2229")
+            canvas.create_line(x, 0, x, height, fill=self.theme["canvas_grid"])
         for y in range(0, height, step):
-            canvas.create_line(0, y, width, y, fill="#1b2229")
-        canvas.create_text(width / 2, height / 2 - 14, text="Live View", fill="#e7edf5", font=("Segoe UI Semibold", 14))
-        stage_text = self.stage_position_var.get() if hasattr(self, "stage_position_var") else "X: -, Y: -"
-        canvas.create_text(width / 2, height / 2 + 12, text=self.live_view_status_var.get(), fill="#9aa6b2", font=("Segoe UI", 10))
-        canvas.create_text(width / 2, height / 2 + 34, text=stage_text, fill="#728091", font=("Segoe UI", 10))
+            canvas.create_line(0, y, width, y, fill=self.theme["canvas_grid"])
+        canvas.create_text(width / 2, height / 2 - 14, text="Live View", fill=self.theme["text"], font=("Segoe UI Semibold", 14))
+        canvas.create_text(width / 2, height / 2 + 12, text=self.live_view_status_var.get(), fill=self.theme["muted"], font=("Segoe UI", 10))
 
     def _render_live_photo(self):
         if not hasattr(self, "live_view_canvas"):
@@ -3477,12 +3983,15 @@ class HeraTriggerApp(tk.Tk):
             canvas = self.live_view_canvas
             width = max(canvas.winfo_width(), 10)
             height = max(canvas.winfo_height(), 10)
+            base_w, base_h = self._fit_dimensions(src_width, src_height, max(width - 16, 1), max(height - 16, 1))
+            target_w = max(1, int(round(base_w * self.live_zoom_factor)))
+            target_h = max(1, int(round(base_h * self.live_zoom_factor)))
             self.live_photo, out_w, out_h = self._make_ppm_photo_from_grayscale(
                 render_bytes,
                 src_width,
                 src_height,
-                max(width - 16, 1),
-                max(height - 16, 1),
+                target_w,
+                target_h,
                 render_mask,
             )
         except tk.TclError as exc:
@@ -3497,9 +4006,10 @@ class HeraTriggerApp(tk.Tk):
             return
         canvas = self.live_view_canvas
         canvas.delete("all")
-        canvas.create_rectangle(0, 0, width, height, fill="#101418", outline="")
-        left = (width - out_w) / 2
-        top = (height - out_h) / 2
+        canvas.create_rectangle(0, 0, width, height, fill=self.theme["canvas"], outline="")
+        self._clamp_live_pan(width, height, out_w, out_h)
+        left = (width - out_w) / 2 + self.live_pan_x
+        top = (height - out_h) / 2 + self.live_pan_y
         if frame_info:
             frame_width, frame_height, _ = frame_info
         else:
@@ -3518,9 +4028,6 @@ class HeraTriggerApp(tk.Tk):
                 fill="#e7edf5",
                 font=("Segoe UI", 9),
             )
-            stage_text = self.stage_position_var.get() if hasattr(self, "stage_position_var") else ""
-            if stage_text:
-                canvas.create_text(12, 30, anchor="nw", text=stage_text, fill="#9aa6b2", font=("Segoe UI", 9))
         self._draw_live_roi_overlay(canvas)
         if not self.live_first_frame_rendered:
             self.live_first_frame_rendered = True
@@ -3551,7 +4058,7 @@ class HeraTriggerApp(tk.Tk):
     def on_live_mouse_move(self, event):
         image_pos = self._live_event_to_image_xy(event)
         if not image_pos:
-            self.live_cursor_var.set("Live cursor: -")
+            self.live_cursor_var.set(self._live_cursor_status_text("-"))
             return
 
         image_x, image_y, frame_width, frame_height = image_pos
@@ -3580,22 +4087,16 @@ class HeraTriggerApp(tk.Tk):
         bottom = max(y0, y1)
         width = min(frame_width - left, right - left + 1)
         height = min(frame_height - top, bottom - top + 1)
-        self.live_roi_rect = (left, top, width, height)
         self.live_roi_points = []
         self.live_roi_selecting = False
         self.live_roi_button_var.set("Select ROI")
-
-        self.param_vars["roi_x"].set(left)
-        self.param_vars["roi_y"].set(top)
-        self.param_vars["roi_w"].set(width)
-        self.param_vars["roi_h"].set(height)
-        self.live_roi_status_var.set(f"ROI: x={left}, y={top}, w={width}, h={height}")
+        self._set_roi_fields(left, top, width, height, update_live=True)
         self.log(f"Live ROI selected: x={left}, y={top}, width={width}, height={height}. Press Apply Parameters to send it to Hera.")
         self._draw_live_view_placeholder()
 
     def on_live_mouse_leave(self, _event=None):
         self.live_cursor_image_xy = None
-        self.live_cursor_var.set("Live cursor: -")
+        self.live_cursor_var.set(self._live_cursor_status_text("-"))
 
     def toggle_live_roi_selection(self):
         self.live_roi_selecting = not self.live_roi_selecting
@@ -3617,15 +4118,89 @@ class HeraTriggerApp(tk.Tk):
             frame_size = self.live_display_frame_size
         if frame_size:
             frame_width, frame_height = frame_size
-            self.param_vars["roi_x"].set(0)
-            self.param_vars["roi_y"].set(0)
-            self.param_vars["roi_w"].set(frame_width)
-            self.param_vars["roi_h"].set(frame_height)
-            self.live_roi_status_var.set(f"ROI: full frame {frame_width} x {frame_height}")
+            self._set_roi_fields(0, 0, frame_width, frame_height, update_live=False, status=f"ROI: full frame {frame_width} x {frame_height}")
             self.log(f"Live ROI cleared to full frame: width={frame_width}, height={frame_height}. Press Apply Parameters to send it to Hera.")
         else:
             self.live_roi_status_var.set("ROI: -")
         self._draw_live_view_placeholder()
+
+    def _read_int_var(self, var, name):
+        try:
+            return int(var.get())
+        except (tk.TclError, ValueError):
+            raise ValueError(f"{name} must be a whole number.")
+
+    def _read_roi_size_fields(self):
+        left = self._read_int_var(self.param_vars["roi_x"], "ROI X")
+        top = self._read_int_var(self.param_vars["roi_y"], "ROI Y")
+        width = max(1, self._read_int_var(self.param_vars["roi_w"], "ROI width"))
+        height = max(1, self._read_int_var(self.param_vars["roi_h"], "ROI height"))
+        return left, top, width, height
+
+    def _set_roi_fields(self, left, top, width, height, update_live=True, status=None):
+        left = int(left)
+        top = int(top)
+        width = max(1, int(width))
+        height = max(1, int(height))
+        self.param_vars["roi_x"].set(left)
+        self.param_vars["roi_y"].set(top)
+        self.param_vars["roi_w"].set(width)
+        self.param_vars["roi_h"].set(height)
+        right = left + width - 1
+        bottom = top + height - 1
+        self.roi_tl_x_var.set(left)
+        self.roi_tl_y_var.set(top)
+        self.roi_tr_x_var.set(right)
+        self.roi_tr_y_var.set(top)
+        self.roi_br_x_var.set(right)
+        self.roi_br_y_var.set(bottom)
+        self.roi_bl_x_var.set(left)
+        self.roi_bl_y_var.set(bottom)
+        self.roi_area_var.set(str(width * height))
+        if update_live:
+            self.live_roi_rect = (left, top, width, height)
+        self.live_roi_status_var.set(status or f"ROI: x={left}, y={top}, w={width}, h={height}, area={width * height}")
+
+    def apply_roi_from_size(self):
+        try:
+            left, top, width, height = self._read_roi_size_fields()
+            self._set_roi_fields(left, top, width, height, update_live=True)
+            self.log(f"ROI size applied: x={left}, y={top}, width={width}, height={height}. Press Apply Parameters to send it to Hera.")
+            self._draw_live_view_placeholder()
+        except Exception as exc:
+            self.live_roi_status_var.set(f"ROI: {exc}")
+
+    def apply_roi_from_corners(self):
+        try:
+            x0 = self._read_int_var(self.roi_tl_x_var, "Top-left X")
+            y0 = self._read_int_var(self.roi_tl_y_var, "Top-left Y")
+            x1 = self._read_int_var(self.roi_br_x_var, "Bottom-right X")
+            y1 = self._read_int_var(self.roi_br_y_var, "Bottom-right Y")
+            left = min(x0, x1)
+            top = min(y0, y1)
+            width = abs(x1 - x0) + 1
+            height = abs(y1 - y0) + 1
+            self._set_roi_fields(left, top, width, height, update_live=True)
+            self.log(f"ROI corners applied from top-left and bottom-right: x={left}, y={top}, width={width}, height={height}. Press Apply Parameters to send it to Hera.")
+            self._draw_live_view_placeholder()
+        except Exception as exc:
+            self.live_roi_status_var.set(f"ROI: {exc}")
+
+    def apply_roi_from_area(self):
+        try:
+            area = max(1, int(float(self.roi_area_var.get())))
+            left, top, width, height = self._read_roi_size_fields()
+            center_x = left + (width - 1) / 2.0
+            center_y = top + (height - 1) / 2.0
+            new_width = max(1, int(round(math.sqrt(area))))
+            new_height = max(1, int(math.ceil(area / new_width)))
+            new_left = max(0, int(round(center_x - (new_width - 1) / 2.0)))
+            new_top = max(0, int(round(center_y - (new_height - 1) / 2.0)))
+            self._set_roi_fields(new_left, new_top, new_width, new_height, update_live=True)
+            self.log(f"ROI area applied as near-square region: area={area}, width={new_width}, height={new_height}. Press Apply Parameters to send it to Hera.")
+            self._draw_live_view_placeholder()
+        except Exception as exc:
+            self.live_roi_status_var.set(f"ROI: {exc}")
 
     def _format_live_roi_status(self):
         if not self.live_roi_rect:
@@ -3673,18 +4248,18 @@ class HeraTriggerApp(tk.Tk):
     def _update_live_cursor_readout(self):
         cursor = self.live_cursor_image_xy
         if not cursor:
-            self.live_cursor_var.set("Live cursor: -")
+            self.live_cursor_var.set(self._live_cursor_status_text("-"))
             return
 
         image_x, image_y, frame_width, frame_height = cursor
         if not self.latest_stage_xy:
-            self.live_cursor_var.set(f"Live cursor: px=({image_x}, {image_y}), sample=stage not connected")
+            self.live_cursor_var.set(self._live_cursor_status_text("sample: stage not connected"))
             return
 
         try:
             units_per_pixel = float(self.live_pixel_size_var.get())
         except (tk.TclError, ValueError):
-            self.live_cursor_var.set(f"Live cursor: px=({image_x}, {image_y}), sample=invalid scale")
+            self.live_cursor_var.set(self._live_cursor_status_text("sample: invalid scale"))
             return
 
         dx_px = image_x - ((frame_width - 1) / 2.0)
@@ -3699,9 +4274,7 @@ class HeraTriggerApp(tk.Tk):
         stage_x, stage_y = self.latest_stage_xy
         sample_x = stage_x + dx_px * units_per_pixel
         sample_y = stage_y + dy_px * units_per_pixel
-        self.live_cursor_var.set(
-            f"Live cursor: px=({image_x}, {image_y})  sample X={sample_x:.3f}, Y={sample_y:.3f}"
-        )
+        self.live_cursor_var.set(self._live_cursor_status_text(f"sample X={sample_x:.3f}, Y={sample_y:.3f}"))
 
     def _draw_hyperspectral_view_placeholder(self):
         if not hasattr(self, "hyper_view_canvas"):
@@ -3710,7 +4283,7 @@ class HeraTriggerApp(tk.Tk):
         canvas.delete("all")
         width = max(canvas.winfo_width(), 10)
         height = max(canvas.winfo_height(), 10)
-        canvas.create_rectangle(0, 0, width, height, fill="#101418", outline="")
+        canvas.create_rectangle(0, 0, width, height, fill=self.theme["canvas"], outline="")
         for i, color in enumerate(["#24435b", "#2f6c8f", "#4ea4cf", "#7fd0ff", "#ff8b3d"]):
             x0 = 18 + i * 30
             canvas.create_rectangle(x0, height - 42, x0 + 20, height - 18, fill=color, outline="")
@@ -3718,11 +4291,11 @@ class HeraTriggerApp(tk.Tk):
             detail_text = "Waiting for the current acquisition and cube computation to finish"
         else:
             detail_text = "Run one acquisition to populate the in-app band viewer"
-        canvas.create_text(width / 2, height / 2 - 20, text="Hyperspectral View", fill="#e7edf5", font=("Segoe UI Semibold", 14))
-        canvas.create_text(width / 2, height / 2 + 2, text=detail_text, fill="#9aa6b2", font=("Segoe UI", 10))
+        canvas.create_text(width / 2, height / 2 - 20, text="Hyperspectral View", fill=self.theme["text"], font=("Segoe UI Semibold", 14))
+        canvas.create_text(width / 2, height / 2 + 2, text=detail_text, fill=self.theme["muted"], font=("Segoe UI", 10))
         export_text = self.last_export_var.get() if hasattr(self, "last_export_var") else "Last export: -"
-        canvas.create_text(width / 2, height / 2 + 24, text=self.hypercube_summary_var.get(), fill="#d3dbe5", font=("Segoe UI", 10))
-        canvas.create_text(width / 2, height / 2 + 46, text=export_text, fill="#728091", font=("Segoe UI", 10))
+        canvas.create_text(width / 2, height / 2 + 24, text=self.hypercube_summary_var.get(), fill=self.theme["text"], font=("Segoe UI", 10))
+        canvas.create_text(width / 2, height / 2 + 46, text=export_text, fill=self.theme["muted"], font=("Segoe UI", 10))
 
     def update_state(self, state_key):
         label = self.STATE_LABELS.get(state_key, state_key)
