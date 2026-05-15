@@ -100,6 +100,8 @@ ERROR message here
 - If `commands\current_getz.txt` and `state\current_getz.id` remain too long without a valid response, the slot is stale and should be archived by the sync.
 - The hotkey runner must not hammer F4 or delete responses while the macro is writing.
 - The HERA app must reset pending Z request state after timeout/failure and should fully exit on close to avoid duplicate HERA app instances.
+- HERA live capture can make gain/exposure/ROI read-only or slow to stop. Keep parameter apply off the Tk main thread: pause live capture in a worker, apply camera settings, then schedule UI updates and live restart back on Tk.
+- Live cursor sample coordinates are not provided by the Hera SDK directly. The app maps canvas mouse coordinates to live-frame pixels, then converts pixel offset from image center into Tango sample X/Y using `Stage units / pixel`, `Invert X`, `Invert Y`, and `Swap XY`.
 
 ## NIS PC Update From GitHub
 

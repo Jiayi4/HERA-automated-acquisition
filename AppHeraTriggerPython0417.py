@@ -1045,6 +1045,7 @@ class HeraTriggerApp(tk.Tk):
         self.processing_lock = threading.Lock()
         self.stage_lock = threading.Lock()
         self.live_frame_lock = threading.Lock()
+        self.parameter_apply_lock = threading.Lock()
         self.app_state = self.STATE_LABELS["Idle"]
         self.stage_poll_job = None
         self.timelapse_thread = None
@@ -1071,10 +1072,15 @@ class HeraTriggerApp(tk.Tk):
         self.last_export_var = tk.StringVar(value="Last export: -")
         self.hypercube_summary_var = tk.StringVar(value="Cube: waiting for acquisition")
         self.live_view_status_var = tk.StringVar(value="Live view: waiting for frames")
+        self.live_cursor_var = tk.StringVar(value="Live cursor: -")
         self.pending_export_tag = None
         self.live_photo = None
         self.live_frame_info = None
         self.latest_live_frame = None
+        self.live_display_rect = None
+        self.live_display_frame_size = None
+        self.live_cursor_image_xy = None
+        self.latest_stage_xy = None
         self.live_pixel_format_name = "Unknown"
         self.live_first_frame_logged = False
         self.live_first_frame_rendered = False
@@ -1082,6 +1088,7 @@ class HeraTriggerApp(tk.Tk):
         self.live_render_pending = False
         self.last_live_render_time = 0.0
         self.live_render_interval_sec = 0.20
+        self.resume_live_after_acquisition = False
         self.live_max_preview_width = 480
         self.live_auth_warning_logged = False
         self.last_live_decode_error = ""
@@ -1305,7 +1312,7 @@ class HeraTriggerApp(tk.Tk):
 
         actions = tk.Frame(params)
         actions.grid(row=row, column=0, columnspan=3, pady=8, sticky="w")
-        tk.Button(actions, text="Apply Parameters", command=self.apply_parameters).pack(side="left", padx=(0, 6))
+        tk.Button(actions, text="Apply Parameters", command=self.apply_parameters_async).pack(side="left", padx=(0, 6))
         tk.Button(actions, text="Start Hera Acquisition", command=self.start_acquisition).pack(side="left", padx=6)
         tk.Button(actions, text="Abort Hera Acquisition", command=self.abort_acquisition).pack(side="left", padx=6)
 
@@ -1315,6 +1322,10 @@ class HeraTriggerApp(tk.Tk):
         frame.grid_columnconfigure(0, weight=1)
         self.stage_speed_var = tk.DoubleVar(value=20.0)
         self.stage_dwell_var = tk.DoubleVar(value=0.0)
+        self.live_pixel_size_var = tk.DoubleVar(value=1.0)
+        self.live_invert_x_var = tk.BooleanVar(value=False)
+        self.live_invert_y_var = tk.BooleanVar(value=False)
+        self.live_swap_xy_var = tk.BooleanVar(value=False)
         self.position_name_var = tk.StringVar()
         self.selected_name_var = tk.StringVar()
         self.selected_x_var = tk.StringVar()
@@ -1351,8 +1362,23 @@ class HeraTriggerApp(tk.Tk):
         self.current_z_label = tk.Label(pos_panel, textvariable=self.nis_z_current_z_var)
         self.current_z_label.pack(anchor="w", pady=(4, 0))
 
+        live_cal_panel = tk.LabelFrame(frame, text="Live Cursor Sample Mapping", padx=8, pady=8)
+        live_cal_panel.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        pixel_row = tk.Frame(live_cal_panel)
+        pixel_row.pack(fill="x")
+        tk.Label(pixel_row, text="Stage units / pixel").pack(side="left")
+        tk.Entry(pixel_row, textvariable=self.live_pixel_size_var, width=8).pack(side="left", padx=(6, 0))
+        axis_row = tk.Frame(live_cal_panel)
+        axis_row.pack(fill="x", pady=(6, 0))
+        tk.Checkbutton(axis_row, text="Invert X", variable=self.live_invert_x_var,
+                       command=self._update_live_cursor_readout).pack(side="left")
+        tk.Checkbutton(axis_row, text="Invert Y", variable=self.live_invert_y_var,
+                       command=self._update_live_cursor_readout).pack(side="left", padx=(8, 0))
+        tk.Checkbutton(axis_row, text="Swap XY", variable=self.live_swap_xy_var,
+                       command=self._update_live_cursor_readout).pack(side="left", padx=(8, 0))
+
         goto_panel = tk.LabelFrame(frame, text="Go To Saved Position", padx=8, pady=8)
-        goto_panel.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        goto_panel.grid(row=8, column=0, sticky="ew", pady=(10, 0))
         top_row = tk.Frame(goto_panel)
         top_row.pack(fill="x")
         tk.Button(top_row, text="Go", width=6, command=self.goto_selected_position).pack(side="left")
@@ -1371,7 +1397,7 @@ class HeraTriggerApp(tk.Tk):
         tk.Button(coord_actions, text="Save Selected Edits", command=self.apply_selected_position_edits).pack(side="left", padx=6)
 
         tl = tk.LabelFrame(frame, text="Timelapse Settings", padx=8, pady=8)
-        tl.grid(row=8, column=0, sticky="ew", pady=(10, 0))
+        tl.grid(row=9, column=0, sticky="ew", pady=(10, 0))
         tk.Label(tl, text="Interval (min)").grid(row=0, column=0, sticky="w")
         self.interval_var = tk.DoubleVar(value=10.0)
         tk.Entry(tl, textvariable=self.interval_var, width=8).grid(row=0, column=1, sticky="w", padx=(6, 10))
@@ -1453,7 +1479,13 @@ class HeraTriggerApp(tk.Tk):
         notebook.add(live_tab, text="Live View")
         notebook.add(hyper_tab, text="Hyperspectral View")
 
+        live_cursor_bar = tk.Frame(live_tab, bg=self.theme["panel"])
+        live_cursor_bar.pack(fill="x", padx=8, pady=(8, 4))
+        tk.Label(live_cursor_bar, textvariable=self.live_cursor_var, fg="#e7edf5", bg=self.theme["panel"],
+                 font=("Segoe UI Semibold", 10)).pack(side="left")
         self.live_view_canvas = tk.Canvas(live_tab, bg="#101418", highlightthickness=0)
+        self.live_view_canvas.bind("<Motion>", self.on_live_mouse_move)
+        self.live_view_canvas.bind("<Leave>", self.on_live_mouse_leave)
         self.live_view_canvas.pack(fill="both", expand=True)
         hyper_controls = tk.Frame(hyper_tab, bg=self.theme["panel"])
         hyper_controls.pack(fill="x", padx=8, pady=(8, 4))
@@ -1738,6 +1770,8 @@ class HeraTriggerApp(tk.Tk):
             self.stage_position_var.set("X: -, Y: -")
             self.current_x_label.config(text="X: -")
             self.current_y_label.config(text="Y: -")
+            self.latest_stage_xy = None
+            self._update_live_cursor_readout()
             self.log("Tango stage disconnected.")
         except Exception as exc:
             self.log(f"Failed to disconnect stage: {exc}")
@@ -1827,13 +1861,17 @@ class HeraTriggerApp(tk.Tk):
         if self.tango and self.tango.connected:
             try:
                 x, y, _, _ = self.tango.get_position()
+                self.latest_stage_xy = (x, y)
                 z_text = self.nis_z_current_z_var.get() if hasattr(self, "nis_z_current_z_var") else "Z: -"
                 self.stage_position_var.set(f"X: {x:.3f}, Y: {y:.3f}, {z_text}")
                 self.current_x_label.config(text=f"X: {x:.3f}")
                 self.current_y_label.config(text=f"Y: {y:.3f}")
+                self._update_live_cursor_readout()
                 self._draw_live_view_placeholder()
             except Exception:
                 pass
+        else:
+            self.latest_stage_xy = None
 
     def start_stage_polling(self):
         self._poll_stage_position()
@@ -2052,9 +2090,13 @@ class HeraTriggerApp(tk.Tk):
         with self.live_frame_lock:
             self.latest_live_frame = None
             self.live_frame_info = None
+            self.live_display_rect = None
+            self.live_display_frame_size = None
+            self.live_cursor_image_xy = None
             self.live_render_pending = False
             self.last_live_render_time = 0.0
         self.live_photo = None
+        self.live_cursor_var.set("Live cursor: -")
         self.live_first_frame_rendered = False
         self.live_auth_warning_logged = False
         self.last_live_decode_error = ""
@@ -2207,22 +2249,75 @@ class HeraTriggerApp(tk.Tk):
         else:
             self.log("Live diagnostics: no live frame metadata available yet.")
 
-    def apply_parameters(self):
-        if not self.controller or not self.controller.connected:
-            self.log("Connect to Hera before applying parameters.")
+    def _read_hera_parameter_settings(self):
+        return {
+            "gain": float(self.param_vars["gain"].get()),
+            "exposure_ms": float(self.param_vars["exposure"].get()),
+            "roi_x": int(self.param_vars["roi_x"].get()),
+            "roi_y": int(self.param_vars["roi_y"].get()),
+            "roi_w": int(self.param_vars["roi_w"].get()),
+            "roi_h": int(self.param_vars["roi_h"].get()),
+            "scan_mode_name": self.param_vars["scan_mode"].get(),
+            "trigger_mode_name": self.param_vars["trigger_mode"].get(),
+            "bands": int(self.param_vars["bands"].get()),
+        }
+
+    def apply_parameters_async(self):
+        if not self.parameter_apply_lock.acquire(blocking=False):
+            self.log("Hera parameter apply is already running.")
             return
         try:
-            gain = float(self.param_vars["gain"].get())
-            exposure_ms = float(self.param_vars["exposure"].get())
-            roi_x = int(self.param_vars["roi_x"].get())
-            roi_y = int(self.param_vars["roi_y"].get())
-            roi_w = int(self.param_vars["roi_w"].get())
-            roi_h = int(self.param_vars["roi_h"].get())
-            scan_mode_name = self.param_vars["scan_mode"].get()
-            trigger_mode_name = self.param_vars["trigger_mode"].get()
+            settings = self._read_hera_parameter_settings()
+        except Exception as exc:
+            self.parameter_apply_lock.release()
+            self.log(f"Failed to read Hera parameters from the UI: {exc}")
+            self.update_state("Error")
+            return
+
+        self.log("Applying Hera parameters...")
+
+        def worker():
+            try:
+                self._apply_parameters_from_settings(settings, restart_live=True)
+            finally:
+                self.parameter_apply_lock.release()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def apply_parameters(self, restart_live=True):
+        try:
+            settings = self._read_hera_parameter_settings()
+        except Exception as exc:
+            self.log(f"Failed to read Hera parameters from the UI: {exc}")
+            self.update_state("Error")
+            return False
+        return self._apply_parameters_from_settings(settings, restart_live=restart_live)
+
+    def _apply_parameters_from_settings(self, settings, restart_live=True):
+        if not self.controller or not self.controller.connected:
+            self._log_async("Connect to Hera before applying parameters.")
+            return False
+        live_was_running = False
+        try:
+            live_was_running = self.controller.is_live_capturing()
+            if live_was_running:
+                self._log_async("Stopping Hera live view before applying camera parameters.")
+                self.controller.stop_live_capture(silent=True)
+                self._safe_after(0, self._clear_live_view_frame_state)
+                self._safe_after(0, lambda: self._set_live_view_status("Live view: stopped"))
+                self._safe_after(0, self._draw_live_view_placeholder)
+
+            gain = settings["gain"]
+            exposure_ms = settings["exposure_ms"]
+            roi_x = settings["roi_x"]
+            roi_y = settings["roi_y"]
+            roi_w = settings["roi_w"]
+            roi_h = settings["roi_h"]
+            scan_mode_name = settings["scan_mode_name"]
+            trigger_mode_name = settings["trigger_mode_name"]
             scan_mode = self.SCAN_MODES[scan_mode_name]
             trigger_mode = self.TRIGGER_MODES[trigger_mode_name]
-            bands = int(self.param_vars["bands"].get())
+            bands = settings["bands"]
 
             if not self.controller.is_scan_mode_supported(scan_mode):
                 raise RuntimeError(f"Scan mode '{scan_mode_name}' is not supported by the connected device.")
@@ -2237,40 +2332,46 @@ class HeraTriggerApp(tk.Tk):
                         gain = min(1.0, max(0.0, steps * resolution))
                     self.controller.set_gain(gain)
                     actual_gain = self.controller.get_gain()
-                    self.log(f"Set gain level: requested={gain:.6f}, actual={actual_gain:.6f}")
+                    self._log_async(f"Set gain level: requested={gain:.6f}, actual={actual_gain:.6f}")
                 except Exception as exc:
                     current_gain = self.controller.get_gain()
-                    self.log(f"Gain was not changed: {exc}. Current gain level remains {current_gain:.6f}")
+                    self._log_async(f"Gain was not changed: {exc}. Current gain level remains {current_gain:.6f}")
             else:
                 current_gain = self.controller.get_gain()
-                self.log(f"Gain is read-only on this device. Current gain level: {current_gain:.6f}")
+                self._log_async(f"Gain is read-only on this device. Current gain level: {current_gain:.6f}")
 
             if self.controller.is_exposure_writable():
                 self.controller.set_exposure_ms(exposure_ms)
                 actual_exposure = self.controller.get_exposure_ms()
-                self.log(f"Set exposure: requested={exposure_ms} ms, actual={actual_exposure:.3f} ms")
+                self._log_async(f"Set exposure: requested={exposure_ms} ms, actual={actual_exposure:.3f} ms")
             else:
                 actual_exposure = self.controller.get_exposure_ms()
-                self.log(f"Exposure is read-only on this device. Current exposure: {actual_exposure:.3f} ms")
+                self._log_async(f"Exposure is read-only on this device. Current exposure: {actual_exposure:.3f} ms")
 
             if self.controller.is_roi_writable():
                 self.controller.set_roi(roi_x, roi_y, roi_w, roi_h)
                 actual_roi = self.controller.get_roi()
-                self.log(f"Set ROI: requested=({roi_x}, {roi_y}, {roi_w}, {roi_h}), actual={actual_roi}")
+                self._log_async(f"Set ROI: requested=({roi_x}, {roi_y}, {roi_w}, {roi_h}), actual={actual_roi}")
             else:
                 actual_roi = self.controller.get_roi()
-                self.log(f"ROI is read-only on this device. Current ROI: {actual_roi}")
+                self._log_async(f"ROI is read-only on this device. Current ROI: {actual_roi}")
 
             if bands == 0:
                 bands = self.controller.get_default_output_bands(scan_mode)
-                self.param_vars["bands"].set(bands)
-                self.log(f"Using default bands for scan mode {scan_mode_name}: {bands}")
+                self._safe_after(0, lambda bands=bands: self.param_vars["bands"].set(bands))
+                self._log_async(f"Using default bands for scan mode {scan_mode_name}: {bands}")
 
-            self.update_state("Ready")
-            self.log("Acquisition parameters applied.")
+            self._safe_after(0, lambda: self.update_state("Ready"))
+            self._log_async("Acquisition parameters applied.")
+            return True
         except Exception as exc:
-            self.log(f"Failed to apply parameters: {exc}")
-            self.update_state("Error")
+            self._log_async(f"Failed to apply parameters: {exc}")
+            self._safe_after(0, lambda: self.update_state("Error"))
+            return False
+        finally:
+            if restart_live and live_was_running and self.controller and self.controller.connected:
+                self._log_async("Restarting Hera live view after applying parameters.")
+                self._safe_after(0, self.start_live_view)
 
     def _arm_and_start_acquisition(self, export_tag=None):
         if not self.controller or not self.controller.connected:
@@ -2280,8 +2381,12 @@ class HeraTriggerApp(tk.Tk):
         if self.controller.is_acquiring():
             raise RuntimeError("The device is already acquiring.")
 
-        self.apply_parameters()
-        if self.app_state == self.STATE_LABELS["Error"]:
+        live_was_running = self.controller.is_live_capturing()
+        self.resume_live_after_acquisition = live_was_running
+        if not self.apply_parameters(restart_live=False):
+            if live_was_running and self.controller and self.controller.connected:
+                self.start_live_view()
+                self.resume_live_after_acquisition = False
             raise RuntimeError("Applying Hera parameters failed.")
 
         scan_mode = self.SCAN_MODES[self.param_vars["scan_mode"].get()]
@@ -2322,6 +2427,9 @@ class HeraTriggerApp(tk.Tk):
             self.log("Abort request sent to Hera SDK.")
             self.update_state("Ready")
             self.acquisition_done_event.set()
+            if self.resume_live_after_acquisition:
+                self.resume_live_after_acquisition = False
+                self.start_live_view()
         except Exception as exc:
             self.log(f"Failed to abort acquisition: {exc}")
             self.update_state("Error")
@@ -2901,6 +3009,9 @@ class HeraTriggerApp(tk.Tk):
                 self.controller.release_hyperspectral_data(data_handle)
             self.acquisition_done_event.set()
             self.processing_lock.release()
+            if self.resume_live_after_acquisition:
+                self.resume_live_after_acquisition = False
+                self._safe_after(0, self.start_live_view)
 
     def _log_async(self, message):
         self._safe_after(0, lambda: self.log(message))
@@ -3140,6 +3251,11 @@ class HeraTriggerApp(tk.Tk):
             return
         canvas = self.live_view_canvas
         canvas.delete("all")
+        with self.live_frame_lock:
+            self.live_display_rect = None
+            self.live_display_frame_size = None
+            self.live_cursor_image_xy = None
+        self.live_cursor_var.set("Live cursor: -")
         width = max(canvas.winfo_width(), 10)
         height = max(canvas.winfo_height(), 10)
         canvas.create_rectangle(0, 0, width, height, fill="#101418", outline="")
@@ -3188,6 +3304,15 @@ class HeraTriggerApp(tk.Tk):
         canvas = self.live_view_canvas
         canvas.delete("all")
         canvas.create_rectangle(0, 0, width, height, fill="#101418", outline="")
+        left = (width - out_w) / 2
+        top = (height - out_h) / 2
+        if frame_info:
+            frame_width, frame_height, _ = frame_info
+        else:
+            frame_width, frame_height = src_width, src_height
+        with self.live_frame_lock:
+            self.live_display_rect = (left, top, out_w, out_h)
+            self.live_display_frame_size = (frame_width, frame_height)
         canvas.create_image(width / 2, height / 2, image=self.live_photo, anchor="center")
         if frame_info:
             w, h, bpp = frame_info
@@ -3209,6 +3334,65 @@ class HeraTriggerApp(tk.Tk):
         with self.live_frame_lock:
             self.last_live_render_time = time.time()
             self.live_render_pending = False
+
+    def on_live_mouse_move(self, event):
+        with self.live_frame_lock:
+            rect = self.live_display_rect
+            frame_size = self.live_display_frame_size
+        if not rect or not frame_size:
+            self.live_cursor_var.set("Live cursor: -")
+            return
+
+        left, top, out_w, out_h = rect
+        frame_width, frame_height = frame_size
+        if out_w <= 0 or out_h <= 0 or frame_width <= 0 or frame_height <= 0:
+            self.live_cursor_var.set("Live cursor: -")
+            return
+        if event.x < left or event.x >= left + out_w or event.y < top or event.y >= top + out_h:
+            self.live_cursor_var.set("Live cursor: outside image")
+            return
+
+        image_x = min(max(int((event.x - left) * frame_width / out_w), 0), frame_width - 1)
+        image_y = min(max(int((event.y - top) * frame_height / out_h), 0), frame_height - 1)
+        self.live_cursor_image_xy = (image_x, image_y, frame_width, frame_height)
+        self._update_live_cursor_readout()
+
+    def on_live_mouse_leave(self, _event=None):
+        self.live_cursor_image_xy = None
+        self.live_cursor_var.set("Live cursor: -")
+
+    def _update_live_cursor_readout(self):
+        cursor = self.live_cursor_image_xy
+        if not cursor:
+            self.live_cursor_var.set("Live cursor: -")
+            return
+
+        image_x, image_y, frame_width, frame_height = cursor
+        if not self.latest_stage_xy:
+            self.live_cursor_var.set(f"Live cursor: px=({image_x}, {image_y}), sample=stage not connected")
+            return
+
+        try:
+            units_per_pixel = float(self.live_pixel_size_var.get())
+        except (tk.TclError, ValueError):
+            self.live_cursor_var.set(f"Live cursor: px=({image_x}, {image_y}), sample=invalid scale")
+            return
+
+        dx_px = image_x - ((frame_width - 1) / 2.0)
+        dy_px = image_y - ((frame_height - 1) / 2.0)
+        if self.live_swap_xy_var.get():
+            dx_px, dy_px = dy_px, dx_px
+        if self.live_invert_x_var.get():
+            dx_px = -dx_px
+        if self.live_invert_y_var.get():
+            dy_px = -dy_px
+
+        stage_x, stage_y = self.latest_stage_xy
+        sample_x = stage_x + dx_px * units_per_pixel
+        sample_y = stage_y + dy_px * units_per_pixel
+        self.live_cursor_var.set(
+            f"Live cursor: px=({image_x}, {image_y})  sample X={sample_x:.3f}, Y={sample_y:.3f}"
+        )
 
     def _draw_hyperspectral_view_placeholder(self):
         if not hasattr(self, "hyper_view_canvas"):

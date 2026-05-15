@@ -24,6 +24,8 @@ The current implementation is focused on software-triggered acquisition and is s
 - license status check
 - scan mode and trigger mode support checks
 - graceful handling of read-only camera parameters
+- live-safe parameter apply that pauses live capture before changing gain, exposure, or ROI, then restarts it
+- live cursor readout that maps image pixels to sample/stage X/Y using a configurable pixel scale and axis orientation
 - asynchronous acquisition callback handling
 - hypercube generation with `HeraAPI_GetHyperCubeEx`
 - ENVI export to a user-selected output folder
@@ -91,9 +93,21 @@ python AppHeraTriggerPython0417.py
 2. Verify the SDK DLL path and `HERA_DEVICES`.
 3. Refresh devices and connect to the HERA camera.
 4. Run the preflight check.
-5. Apply acquisition parameters.
+5. Apply acquisition parameters. If live view is running, the app temporarily stops live capture, applies gain/exposure/ROI, reads back actual values, and restarts live view.
 6. Start acquisition.
 7. Wait for the hypercube export to finish.
+
+## Live View Cursor Coordinates
+
+The Live View tab shows cursor coordinates over the rendered camera frame. The app first maps the mouse location back to the live-frame pixel returned by `HeraAPI_GetLiveCaptureInfo`, then converts the pixel offset from the image center into a sample/stage X/Y estimate.
+
+The **Stage Control > Live Cursor Sample Mapping** panel controls this conversion:
+
+- `Stage units / pixel`: physical stage units represented by one live-image pixel.
+- `Invert X` and `Invert Y`: flip the image-to-stage direction for either axis.
+- `Swap XY`: swap image X/Y before applying the stage conversion.
+
+The conversion assumes the current Tango stage X/Y corresponds to the center of the live frame. If the stage moves while the mouse stays over the same live pixel, the displayed sample X/Y updates with the latest stage position.
 
 ## NIS Z Bridge
 
@@ -234,7 +248,7 @@ The immediate goal is reliable GET Z. The larger goal is full XYZ coordination:
 ## Notes
 
 - Some camera parameters, such as gain or ROI, may be read-only depending on the connected hardware configuration.
-- The app logs read-only parameters instead of failing the entire acquisition sequence.
+- The app logs read-only parameters instead of failing the entire acquisition sequence. When live view is active, parameter apply is handled in a background worker so the UI does not freeze while the SDK stops and restarts live capture.
 - ENVI exports are written to the selected output directory.
 - The app has been validated against a working acquisition flow where raw data and hypercube export complete successfully.
 - No local device-configuration folder was found in this workspace, so those files are not bundled automatically.
