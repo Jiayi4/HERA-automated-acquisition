@@ -88,6 +88,12 @@ class HeraController:
             func.argtypes = argtypes
         return func
 
+    def _define_optional_function(self, name, restype=ctypes.c_int, argtypes=None):
+        try:
+            return self._define_function(name, restype, argtypes)
+        except AttributeError:
+            return None
+
     def _define_functions(self):
         self.FloatCallbackType = ctypes.CFUNCTYPE(None, ctypes.c_float)
         self.HyperspectralDataCallbackType = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p)
@@ -130,6 +136,11 @@ class HeraController:
             "HeraAPI_UnregisterHyperspectralDataAcqCallbacks",
             ctypes.c_int,
             [ctypes.c_void_p],
+        )
+        self.HeraAPI_StartHyperspectralDataAcquisition = self._define_function(
+            "HeraAPI_StartHyperspectralDataAcquisition",
+            ctypes.c_int,
+            [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int],
         )
         self.HeraAPI_StartHyperspectralDataAcquisitionEx = self._define_function(
             "HeraAPI_StartHyperspectralDataAcquisitionEx",
@@ -218,6 +229,31 @@ class HeraController:
             ctypes.c_int,
             [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)],
         )
+        self.HeraAPI_IsHDRSupported = self._define_optional_function(
+            "HeraAPI_IsHDRSupported",
+            ctypes.c_int,
+            [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)],
+        )
+        self.HeraAPI_SetHDR = self._define_optional_function(
+            "HeraAPI_SetHDR",
+            ctypes.c_int,
+            [ctypes.c_void_p, ctypes.c_bool],
+        )
+        self.HeraAPI_GetHDR = self._define_optional_function(
+            "HeraAPI_GetHDR",
+            ctypes.c_int,
+            [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)],
+        )
+        self.HeraAPI_GetHyperCubeIsHDR = self._define_optional_function(
+            "HeraAPI_GetHyperCubeIsHDR",
+            ctypes.c_int,
+            [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)],
+        )
+        self.HeraAPI_GetHyperspectralDataIsHDR = self._define_optional_function(
+            "HeraAPI_GetHyperspectralDataIsHDR",
+            ctypes.c_int,
+            [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)],
+        )
         self.HeraAPI_IsScanModeSupported = self._define_function(
             "HeraAPI_IsScanModeSupported",
             ctypes.c_int,
@@ -281,6 +317,16 @@ class HeraController:
             "HeraAPI_IsPixelFormatSupported",
             ctypes.c_int,
             [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_bool)],
+        )
+        self.HeraAPI_IsPixelFormatSupportedEx = self._define_optional_function(
+            "HeraAPI_IsPixelFormatSupportedEx",
+            ctypes.c_int,
+            [ctypes.c_void_p, ctypes.c_int, ctypes.c_bool, ctypes.POINTER(ctypes.c_bool)],
+        )
+        self.HeraAPI_GetLiveCaptureIsHDR = self._define_optional_function(
+            "HeraAPI_GetLiveCaptureIsHDR",
+            ctypes.c_int,
+            [ctypes.c_void_p, ctypes.POINTER(ctypes.c_bool)],
         )
 
     def get_last_error(self):
@@ -433,10 +479,49 @@ class HeraController:
         self.check_status(self.HeraAPI_IsLiveCapturing(self.device_handle, ctypes.byref(capturing)), "Check live capture state")
         return capturing.value
 
-    def is_pixel_format_supported(self, pixel_format):
+    def is_pixel_format_supported(self, pixel_format, hdr=False):
         supported = ctypes.c_bool(False)
+        if self.HeraAPI_IsPixelFormatSupportedEx:
+            self.check_status(
+                self.HeraAPI_IsPixelFormatSupportedEx(
+                    self.device_handle,
+                    ctypes.c_int(pixel_format),
+                    ctypes.c_bool(bool(hdr)),
+                    ctypes.byref(supported),
+                ),
+                "Check pixel format support",
+            )
+            return supported.value
+        if hdr:
+            return False
         self.check_status(self.HeraAPI_IsPixelFormatSupported(self.device_handle, ctypes.c_int(pixel_format), ctypes.byref(supported)), "Check pixel format support")
         return supported.value
+
+    def is_hdr_supported(self):
+        if not self.HeraAPI_IsHDRSupported or not self.HeraAPI_SetHDR or not self.HeraAPI_GetHDR:
+            return False
+        supported = ctypes.c_bool(False)
+        self.check_status(self.HeraAPI_IsHDRSupported(self.device_handle, ctypes.byref(supported)), "Check HDR support")
+        return supported.value
+
+    def set_hdr(self, enabled):
+        if not self.HeraAPI_SetHDR:
+            raise RuntimeError("Live View HDR mode is not available in this Hera SDK DLL.")
+        self.check_status(self.HeraAPI_SetHDR(self.device_handle, ctypes.c_bool(bool(enabled))), "Set HDR")
+
+    def get_hdr(self):
+        if not self.HeraAPI_GetHDR:
+            raise RuntimeError("Live View HDR mode readback is not available in this Hera SDK DLL.")
+        hdr = ctypes.c_bool(False)
+        self.check_status(self.HeraAPI_GetHDR(self.device_handle, ctypes.byref(hdr)), "Get HDR")
+        return hdr.value
+
+    def get_live_capture_is_hdr(self, capture_handle):
+        if not self.HeraAPI_GetLiveCaptureIsHDR:
+            return None
+        hdr = ctypes.c_bool(False)
+        self.check_status(self.HeraAPI_GetLiveCaptureIsHDR(capture_handle, ctypes.byref(hdr)), "Get live HDR flag")
+        return hdr.value
 
     def start_live_capture(self, pixel_format=0):
         self.register_live_callbacks()
@@ -571,7 +656,18 @@ class HeraController:
         self.check_status(self.HeraAPI_GetDefaultOutBands(self.device_handle, ctypes.c_int(scan_mode), ctypes.byref(bands)), "Get default output bands")
         return bands.value
 
-    def start_hyperspectral_acquisition(self, scan_mode, trigger_mode, averages, stabilization_ms):
+    def start_hyperspectral_acquisition(self, scan_mode, trigger_mode, averages, stabilization_ms, use_legacy_internal=False):
+        if use_legacy_internal:
+            self.check_status(
+                self.HeraAPI_StartHyperspectralDataAcquisition(
+                    self.device_handle,
+                    ctypes.c_int(scan_mode),
+                    ctypes.c_int(averages),
+                    ctypes.c_int(stabilization_ms),
+                ),
+                "Start hyperspectral acquisition",
+            )
+            return
         self.check_status(
             self.HeraAPI_StartHyperspectralDataAcquisitionEx(
                 self.device_handle,
@@ -595,6 +691,13 @@ class HeraController:
             "Get hyperspectral data info",
         )
         return width.value, height.value, data_ptr.value
+
+    def get_hyperspectral_data_is_hdr(self, data_handle):
+        if not self.HeraAPI_GetHyperspectralDataIsHDR:
+            return None
+        hdr = ctypes.c_bool(False)
+        self.check_status(self.HeraAPI_GetHyperspectralDataIsHDR(data_handle, ctypes.byref(hdr)), "Get hyperspectral data HDR flag")
+        return hdr.value
 
     def get_hypercube(self, data_handle, data_type, bands_count, binning):
         hypercube_handle = ctypes.c_void_p()
@@ -628,6 +731,13 @@ class HeraController:
             "Get hypercube info",
         )
         return width.value, height.value, bands.value, data_type.value
+
+    def get_hypercube_is_hdr(self, hypercube_handle):
+        if not self.HeraAPI_GetHyperCubeIsHDR:
+            return None
+        hdr = ctypes.c_bool(False)
+        self.check_status(self.HeraAPI_GetHyperCubeIsHDR(hypercube_handle, ctypes.byref(hdr)), "Get hypercube HDR flag")
+        return hdr.value
 
     def get_hypercube_band_data(self, hypercube_handle, band_index, width, height, data_type):
         wavelength = ctypes.c_double()
@@ -1094,13 +1204,19 @@ class HeraTriggerApp(tk.Tk):
         self.hyperlab_shortcut_var = tk.StringVar(value=r"C:\Users\Public\Desktop\Nireos HyperLAB.lnk")
         self.hypercube_summary_var = tk.StringVar(value="Cube: waiting for acquisition")
         self.live_view_status_var = tk.StringVar(value="Live view: waiting for frames")
+        self.hdr_enabled_var = tk.BooleanVar(value=False)
+        self.hdr_status_var = tk.StringVar(value="Live HDR: unknown")
         self.live_cursor_var = tk.StringVar(value=self._live_cursor_status_text("-"))
         self.pending_export_tag = None
         self.live_photo = None
         self.live_frame_info = None
         self.latest_live_frame = None
+        self.latest_live_profile = None
         self.live_autocontrast_var = tk.BooleanVar(value=True)
         self.live_show_saturation_var = tk.BooleanVar(value=False)
+        self.live_cross_enabled_var = tk.BooleanVar(value=False)
+        self.live_profile_status_var = tk.StringVar(value="Cross: off")
+        self.live_cross_point = None
         self.live_gamma_var = tk.DoubleVar(value=1.0)
         self.live_gamma_label_var = tk.StringVar(value="Gamma 1.0")
         self.live_zoom_factor = 1.0
@@ -1130,6 +1246,7 @@ class HeraTriggerApp(tk.Tk):
         self.resume_live_after_acquisition = False
         self.last_applied_roi = None
         self.acquisition_requested_roi = None
+        self.acquisition_requested_hdr = False
         self.live_max_preview_width = 480
         self.live_auth_warning_logged = False
         self.last_live_decode_error = ""
@@ -1370,6 +1487,7 @@ class HeraTriggerApp(tk.Tk):
         for text, var in (
             ("License", self.license_var),
             ("Live", self.live_view_status_var),
+            ("Live HDR", self.hdr_status_var),
             ("NIS Z", self.nis_z_status_var),
             ("Site", self.current_site_var),
             ("Cycle", self.current_cycle_var),
@@ -1407,7 +1525,8 @@ class HeraTriggerApp(tk.Tk):
         exposure.grid_columnconfigure(1, weight=1)
         self._param_entry(exposure, 0, "Gain level (0-1):", "gain", 0.5)
         self._param_entry(exposure, 1, "Exposure (ms):", "exposure", 1.0)
-        tk.Button(exposure, text="Apply Parameters", command=self.apply_parameters_async).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        tk.Checkbutton(exposure, text="Live View HDR", variable=self.hdr_enabled_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        tk.Button(exposure, text="Apply Exposure/Live HDR", command=self.apply_parameters_async).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         roi = tk.LabelFrame(parent, text="Region Of Interest", padx=8, pady=8)
         roi.pack(fill="x", pady=(0, 10))
@@ -1574,6 +1693,11 @@ class HeraTriggerApp(tk.Tk):
                        command=lambda: self._schedule_live_render(force=True),
                        bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
                        activebackground=self.theme["panel"]).pack(side="left", padx=(8, 0))
+        tk.Checkbutton(live_display_bar, text="Cross", variable=self.live_cross_enabled_var,
+                       command=self.toggle_live_cross,
+                       bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
+                       activebackground=self.theme["panel"]).pack(side="left", padx=(8, 0))
+        tk.Label(live_display_bar, textvariable=self.live_profile_status_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(10, 4))
         tk.Label(live_display_bar, textvariable=self.live_gamma_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(10, 4))
         tk.Scale(live_display_bar, variable=self.live_gamma_var, from_=0.2, to=3.0, resolution=0.1,
                  orient="horizontal", length=110, showvalue=False, command=self.on_live_gamma_change,
@@ -1585,7 +1709,11 @@ class HeraTriggerApp(tk.Tk):
         tk.Button(live_display_bar, text="-", width=3, command=lambda: self.zoom_live_view(1 / 1.25)).pack(side="left")
         tk.Button(live_display_bar, text="Fit", command=self.fit_live_view).pack(side="left", padx=(6, 0))
         tk.Button(live_display_bar, text="+", width=3, command=lambda: self.zoom_live_view(1.25)).pack(side="left", padx=(6, 0))
-        self.live_view_canvas = tk.Canvas(live_tab, bg=self.theme["canvas"], highlightthickness=0)
+        live_profile_grid = tk.Frame(live_tab, bg=self.theme["panel"])
+        live_profile_grid.pack(fill="both", expand=True)
+        live_profile_grid.grid_rowconfigure(0, weight=1)
+        live_profile_grid.grid_columnconfigure(0, weight=1)
+        self.live_view_canvas = tk.Canvas(live_profile_grid, bg=self.theme["canvas"], highlightthickness=0)
         self.live_view_canvas.bind("<Motion>", self.on_live_mouse_move)
         self.live_view_canvas.bind("<Button-1>", self.on_live_mouse_click)
         self.live_view_canvas.bind("<MouseWheel>", self.on_live_mousewheel)
@@ -1595,7 +1723,11 @@ class HeraTriggerApp(tk.Tk):
         self.live_view_canvas.bind("<B3-Motion>", self.on_live_pan_drag)
         self.live_view_canvas.bind("<ButtonRelease-3>", self.end_live_pan)
         self.live_view_canvas.bind("<Leave>", self.on_live_mouse_leave)
-        self.live_view_canvas.pack(fill="both", expand=True)
+        self.live_view_canvas.grid(row=0, column=0, sticky="nsew")
+        self.live_vertical_profile_canvas = tk.Canvas(live_profile_grid, bg=self.theme["canvas"], highlightthickness=0, width=120)
+        self.live_vertical_profile_canvas.grid(row=0, column=1, sticky="ns", padx=(6, 0))
+        self.live_horizontal_profile_canvas = tk.Canvas(live_profile_grid, bg=self.theme["canvas"], highlightthickness=0, height=105)
+        self.live_horizontal_profile_canvas.grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
         hyper_controls = tk.Frame(hyper_tab, bg=self.theme["panel"])
         hyper_controls.pack(fill="x", padx=8, pady=(8, 4))
@@ -1620,6 +1752,8 @@ class HeraTriggerApp(tk.Tk):
         self.hyper_view_canvas = tk.Canvas(hyper_tab, bg=self.theme["canvas"], highlightthickness=0)
         self.hyper_view_canvas.pack(fill="both", expand=True)
         self.live_view_canvas.bind("<Configure>", lambda _e: self._draw_live_view_placeholder())
+        self.live_vertical_profile_canvas.bind("<Configure>", lambda _e: self._render_live_profiles())
+        self.live_horizontal_profile_canvas.bind("<Configure>", lambda _e: self._render_live_profiles())
         self.hyper_view_canvas.bind("<Configure>", lambda _e: self.render_current_hyper_band())
         for widget in (hyper_tab, self.hyper_band_scale, self.hyper_view_canvas):
             widget.bind("<Left>", lambda _e: self.step_hyper_band(-1))
@@ -1761,7 +1895,7 @@ class HeraTriggerApp(tk.Tk):
 
         actions = tk.Frame(params)
         actions.grid(row=row, column=0, columnspan=3, pady=8, sticky="w")
-        tk.Button(actions, text="Apply Parameters", command=self.apply_parameters_async).pack(side="left", padx=(0, 6))
+        tk.Button(actions, text="Apply Exposure/Live HDR", command=self.apply_parameters_async).pack(side="left", padx=(0, 6))
         tk.Button(actions, text="Start Hera Acquisition", command=self.start_acquisition).pack(side="left", padx=6)
         tk.Button(actions, text="Abort Hera Acquisition", command=self.abort_acquisition).pack(side="left", padx=6)
 
@@ -1946,6 +2080,11 @@ class HeraTriggerApp(tk.Tk):
                        command=lambda: self._schedule_live_render(force=True),
                        bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
                        activebackground=self.theme["panel"]).pack(side="left", padx=(8, 0))
+        tk.Checkbutton(live_display_bar, text="Cross", variable=self.live_cross_enabled_var,
+                       command=self.toggle_live_cross,
+                       bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
+                       activebackground=self.theme["panel"]).pack(side="left", padx=(8, 0))
+        tk.Label(live_display_bar, textvariable=self.live_profile_status_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(10, 4))
         tk.Label(live_display_bar, textvariable=self.live_gamma_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(10, 4))
         tk.Scale(live_display_bar, variable=self.live_gamma_var, from_=0.2, to=3.0, resolution=0.1,
                  orient="horizontal", length=110, showvalue=False, command=self.on_live_gamma_change,
@@ -1968,7 +2107,11 @@ class HeraTriggerApp(tk.Tk):
         tk.Button(live_roi_bar, text="Clear ROI", command=self.clear_live_roi_selection).pack(side="right", padx=(0, 6))
         tk.Label(live_roi_bar, textvariable=self.live_roi_status_var, fg="#9aa6b2", bg=self.theme["panel"],
                  anchor="w").pack(side="left", fill="x", expand=True)
-        self.live_view_canvas = tk.Canvas(live_tab, bg="#101418", highlightthickness=0)
+        live_profile_grid = tk.Frame(live_tab, bg=self.theme["panel"])
+        live_profile_grid.pack(fill="both", expand=True)
+        live_profile_grid.grid_rowconfigure(0, weight=1)
+        live_profile_grid.grid_columnconfigure(0, weight=1)
+        self.live_view_canvas = tk.Canvas(live_profile_grid, bg="#101418", highlightthickness=0)
         self.live_view_canvas.bind("<Motion>", self.on_live_mouse_move)
         self.live_view_canvas.bind("<Button-1>", self.on_live_mouse_click)
         self.live_view_canvas.bind("<MouseWheel>", self.on_live_mousewheel)
@@ -1978,7 +2121,11 @@ class HeraTriggerApp(tk.Tk):
         self.live_view_canvas.bind("<B3-Motion>", self.on_live_pan_drag)
         self.live_view_canvas.bind("<ButtonRelease-3>", self.end_live_pan)
         self.live_view_canvas.bind("<Leave>", self.on_live_mouse_leave)
-        self.live_view_canvas.pack(fill="both", expand=True)
+        self.live_view_canvas.grid(row=0, column=0, sticky="nsew")
+        self.live_vertical_profile_canvas = tk.Canvas(live_profile_grid, bg="#101418", highlightthickness=0, width=120)
+        self.live_vertical_profile_canvas.grid(row=0, column=1, sticky="ns", padx=(6, 0))
+        self.live_horizontal_profile_canvas = tk.Canvas(live_profile_grid, bg="#101418", highlightthickness=0, height=105)
+        self.live_horizontal_profile_canvas.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         hyper_controls = tk.Frame(hyper_tab, bg=self.theme["panel"])
         hyper_controls.pack(fill="x", padx=8, pady=(8, 4))
         tk.Button(hyper_controls, text="Prev Band", command=lambda: self.step_hyper_band(-1)).pack(side="left", padx=(0, 8))
@@ -2016,6 +2163,8 @@ class HeraTriggerApp(tk.Tk):
         self.hyper_view_canvas = tk.Canvas(hyper_tab, bg="#101418", highlightthickness=0)
         self.hyper_view_canvas.pack(fill="both", expand=True)
         self.live_view_canvas.bind("<Configure>", lambda _e: self._draw_live_view_placeholder())
+        self.live_vertical_profile_canvas.bind("<Configure>", lambda _e: self._render_live_profiles())
+        self.live_horizontal_profile_canvas.bind("<Configure>", lambda _e: self._render_live_profiles())
         self.hyper_view_canvas.bind("<Configure>", lambda _e: self.render_current_hyper_band())
         for widget in (hyper_tab, self.hyper_band_scale, self.hyper_view_canvas):
             widget.bind("<Left>", lambda _e: self.step_hyper_band(-1))
@@ -2389,10 +2538,11 @@ class HeraTriggerApp(tk.Tk):
             self.controller.live_timeout_handler_func = self.on_live_capture_timeout
             self.controller.live_capture_handler_func = self.on_live_capture_frame
             self.controller.connect()
+            self.check_license_status()
+            self.refresh_hdr_status()
             self.start_live_view()
             self.update_state("Ready")
             self.log(f"Connected to Hera device {index}: {self._device_title(self.devices[index])}")
-            self.check_license_status()
         except Exception as exc:
             self.log(f"Failed to connect to Hera device: {exc}")
             self.update_state("Error")
@@ -2409,6 +2559,8 @@ class HeraTriggerApp(tk.Tk):
                 self.controller.disconnect()
             self.controller.release_device()
             self.license_var.set("Unknown")
+            self.hdr_status_var.set("Live HDR: unknown")
+            self.hdr_enabled_var.set(False)
             self.license_ok_seen = False
             self.last_export_var.set("Last export: -")
             self.update_state("Idle")
@@ -2719,6 +2871,26 @@ class HeraTriggerApp(tk.Tk):
         self.log("Hera SDK license is not active.")
         return False
 
+    def refresh_hdr_status(self):
+        if not self.controller or not self.controller.connected:
+            self.hdr_status_var.set("Live HDR: unknown")
+            return False
+        try:
+            if not self.controller.is_hdr_supported():
+                self.hdr_enabled_var.set(False)
+                self.hdr_status_var.set("Live HDR: not supported")
+                self.log("Live View HDR mode is not supported by this Hera device or SDK DLL.")
+                return False
+            actual_hdr = self.controller.get_hdr()
+            self.hdr_enabled_var.set(actual_hdr)
+            self.hdr_status_var.set("Live HDR: on" if actual_hdr else "Live HDR: off")
+            self.log(f"Live View HDR mode supported. Current camera HDR mode: {'on' if actual_hdr else 'off'}.")
+            return True
+        except Exception as exc:
+            self.hdr_status_var.set("Live HDR: check failed")
+            self.log(f"Could not read Live View HDR support/status: {exc}")
+            return False
+
     def start_live_view(self):
         if not self.controller or not self.controller.connected:
             return
@@ -2726,12 +2898,17 @@ class HeraTriggerApp(tk.Tk):
             if self.controller.is_live_capturing():
                 self.log("Hera live capture already running.")
                 return
+            hdr_requested = bool(self.hdr_enabled_var.get())
             supported_formats = []
             for pixel_format, pixel_name in self.LIVE_PIXEL_FORMATS.items():
-                if self.controller.is_pixel_format_supported(pixel_format):
+                if self.controller.is_pixel_format_supported(pixel_format, hdr=hdr_requested):
                     supported_formats.append((pixel_format, pixel_name))
             if supported_formats:
-                self.log("Supported live pixel formats: " + ", ".join(name for _, name in supported_formats))
+                self.log(
+                    "Supported live pixel formats"
+                    f" ({'HDR' if hdr_requested else 'non-HDR'}): "
+                    + ", ".join(name for _, name in supported_formats)
+                )
             selected_format = None
             for pixel_format, pixel_name in supported_formats:
                 if selected_format is None:
@@ -2739,7 +2916,10 @@ class HeraTriggerApp(tk.Tk):
                     self.live_pixel_format_name = pixel_name
                     break
             if selected_format is None:
-                self.log("Live view could not start: no supported live pixel format reported by the SDK.")
+                self.log(
+                    "Live view could not start: no supported live pixel format reported by the SDK "
+                    f"for {'HDR' if hdr_requested else 'non-HDR'} mode."
+                )
                 self._set_live_view_status("Live view: no supported pixel format")
                 return
             self.controller.start_live_capture(pixel_format=selected_format)
@@ -2752,7 +2932,7 @@ class HeraTriggerApp(tk.Tk):
                 except Exception:
                     pass
             self.live_watchdog_job = self._safe_after(8000, self._check_live_view_started)
-            self.log(f"Hera live capture started using {self.live_pixel_format_name}.")
+            self.log(f"Hera live capture started using {self.live_pixel_format_name} ({'HDR' if hdr_requested else 'non-HDR'}).")
         except Exception as exc:
             self._set_live_view_status("Live view: failed to start")
             self.log(f"Live view could not start: {exc}")
@@ -2767,6 +2947,8 @@ class HeraTriggerApp(tk.Tk):
         def worker():
             try:
                 self.controller.stop_live_capture(silent=True)
+                self.controller.wait_for_live_capture_stopped(timeout_sec=5.0)
+                self.controller.unregister_live_callbacks()
                 self._safe_after(0, self._clear_live_view_frame_state)
                 self._safe_after(0, self.start_live_view)
             except Exception as exc:
@@ -2780,6 +2962,8 @@ class HeraTriggerApp(tk.Tk):
             return
         try:
             self.controller.stop_live_capture(silent=True)
+            self.controller.wait_for_live_capture_stopped(timeout_sec=5.0)
+            self.controller.unregister_live_callbacks()
         except Exception:
             pass
         self._clear_live_view_frame_state()
@@ -2789,6 +2973,7 @@ class HeraTriggerApp(tk.Tk):
     def _clear_live_view_frame_state(self):
         with self.live_frame_lock:
             self.latest_live_frame = None
+            self.latest_live_profile = None
             self.live_frame_info = None
             self.live_display_rect = None
             self.live_display_frame_size = None
@@ -2796,6 +2981,8 @@ class HeraTriggerApp(tk.Tk):
             self.live_render_pending = False
             self.last_live_render_time = 0.0
         self.live_photo = None
+        self.live_cross_point = None
+        self.live_profile_status_var.set("Cross: off" if not self.live_cross_enabled_var.get() else "Cross: click live image")
         self.live_cursor_var.set(self._live_cursor_status_text("-"))
         self.live_first_frame_rendered = False
         self.live_auth_warning_logged = False
@@ -2841,6 +3028,11 @@ class HeraTriggerApp(tk.Tk):
             if self.is_closing:
                 return
             info = self.controller.get_live_capture_info(capture_handle)
+            live_is_hdr = None
+            try:
+                live_is_hdr = self.controller.get_live_capture_is_hdr(capture_handle)
+            except Exception:
+                live_is_hdr = None
             self.live_auth_warning_logged = False
             self.last_live_decode_error = ""
             if not info["data_ptr"] or self.is_closing:
@@ -2868,10 +3060,12 @@ class HeraTriggerApp(tk.Tk):
                 scale,
             )
             _, preview_min, preview_max = self._normalize_grayscale_for_display(display_bytes)
+            threshold_display = self._display_saturation_threshold(saturation_threshold, bit_depth, bits_per_pixel)
 
             with self.live_frame_lock:
                 self.live_frame_info = (width, height, bits_per_pixel)
                 self.latest_live_frame = (disp_width, disp_height, display_bytes, saturation_mask)
+                self.latest_live_profile = (disp_width, disp_height, display_bytes, threshold_display)
             self._set_live_view_status(f"Live view: receiving {self.live_pixel_format_name}")
             if not self.live_first_frame_logged:
                 self.live_first_frame_logged = True
@@ -2881,8 +3075,10 @@ class HeraTriggerApp(tk.Tk):
                     except Exception:
                         pass
                     self.live_watchdog_job = None
+                hdr_text = "unknown" if live_is_hdr is None else ("on" if live_is_hdr else "off")
                 self._log_async(
-                    f"First live frame received: {width}x{height}, bitDepth={bit_depth}, bitsPerPixel={bits_per_pixel}, format={self.live_pixel_format_name}"
+                    f"First live frame received: {width}x{height}, bitDepth={bit_depth}, "
+                    f"bitsPerPixel={bits_per_pixel}, format={self.live_pixel_format_name}, HDR={hdr_text}"
                 )
                 self._log_async(f"Live preview auto-contrast range: min={preview_min}, max={preview_max}")
             self._schedule_live_render(force=not self.live_photo)
@@ -2925,9 +3121,10 @@ class HeraTriggerApp(tk.Tk):
             return
 
         supported_names = []
+        hdr_requested = bool(self.hdr_enabled_var.get())
         for pixel_format, pixel_name in self.LIVE_PIXEL_FORMATS.items():
             try:
-                if self.controller.is_pixel_format_supported(pixel_format):
+                if self.controller.is_pixel_format_supported(pixel_format, hdr=hdr_requested):
                     supported_names.append(pixel_name)
             except Exception:
                 pass
@@ -2938,6 +3135,7 @@ class HeraTriggerApp(tk.Tk):
             f"status='{self.live_view_status_var.get()}', "
             f"first_frame={self.live_first_frame_logged}, "
             f"first_render={self.live_first_frame_rendered}, "
+            f"HDR={'on' if hdr_requested else 'off'}, "
             f"selected_format={self.live_pixel_format_name}, "
             f"supported={supported_names or ['none']}"
         )
@@ -2959,6 +3157,8 @@ class HeraTriggerApp(tk.Tk):
             "roi_y": int(self.param_vars["roi_y"].get()),
             "roi_w": int(self.param_vars["roi_w"].get()),
             "roi_h": int(self.param_vars["roi_h"].get()),
+            "apply_roi": False,
+            "hdr_enabled": bool(self.hdr_enabled_var.get()),
             "scan_mode_name": self.param_vars["scan_mode"].get(),
             "trigger_mode_name": self.param_vars["trigger_mode"].get(),
             "bands": int(self.param_vars["bands"].get()),
@@ -2986,13 +3186,16 @@ class HeraTriggerApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def apply_parameters(self, restart_live=True):
+    def apply_parameters(self, restart_live=True, apply_roi=False, hdr_enabled=None):
         try:
             settings = self._read_hera_parameter_settings()
         except Exception as exc:
             self.log(f"Failed to read Hera parameters from the UI: {exc}")
             self.update_state("Error")
             return False
+        settings["apply_roi"] = bool(apply_roi)
+        if hdr_enabled is not None:
+            settings["hdr_enabled"] = bool(hdr_enabled)
         return self._apply_parameters_from_settings(settings, restart_live=restart_live)
 
     def _apply_parameters_from_settings(self, settings, restart_live=True):
@@ -3005,6 +3208,8 @@ class HeraTriggerApp(tk.Tk):
             if live_was_running:
                 self._log_async("Stopping Hera live view before applying camera parameters.")
                 self.controller.stop_live_capture(silent=True)
+                self.controller.wait_for_live_capture_stopped(timeout_sec=5.0)
+                self.controller.unregister_live_callbacks()
                 self._safe_after(0, self._clear_live_view_frame_state)
                 self._safe_after(0, lambda: self._set_live_view_status("Live view: stopped"))
                 self._safe_after(0, self._draw_live_view_placeholder)
@@ -3015,6 +3220,8 @@ class HeraTriggerApp(tk.Tk):
             roi_y = settings["roi_y"]
             roi_w = settings["roi_w"]
             roi_h = settings["roi_h"]
+            apply_roi = settings.get("apply_roi", False)
+            hdr_enabled = settings.get("hdr_enabled", False)
             scan_mode_name = settings["scan_mode_name"]
             trigger_mode_name = settings["trigger_mode_name"]
             scan_mode = self.SCAN_MODES[scan_mode_name]
@@ -3025,6 +3232,25 @@ class HeraTriggerApp(tk.Tk):
                 raise RuntimeError(f"Scan mode '{scan_mode_name}' is not supported by the connected device.")
             if not self.controller.is_trigger_mode_supported(trigger_mode):
                 raise RuntimeError(f"Trigger mode '{trigger_mode_name}' is not supported by the connected device.")
+
+            try:
+                if self.controller.is_hdr_supported():
+                    self.controller.set_hdr(hdr_enabled)
+                    actual_hdr = self.controller.get_hdr()
+                    time.sleep(0.2)
+                    self._safe_after(0, lambda actual_hdr=actual_hdr: self.hdr_enabled_var.set(actual_hdr))
+                    self._set_var_async(self.hdr_status_var, "Live HDR: on" if actual_hdr else "Live HDR: off")
+                    self._log_async(f"Set Live View HDR: requested={'on' if hdr_enabled else 'off'}, actual={'on' if actual_hdr else 'off'}")
+                else:
+                    if hdr_enabled:
+                        raise RuntimeError("Live View HDR was requested, but this Hera device or SDK DLL reports HDR is not supported.")
+                    self._safe_after(0, lambda: self.hdr_enabled_var.set(False))
+                    self._set_var_async(self.hdr_status_var, "Live HDR: not supported")
+            except Exception as exc:
+                self._log_async(f"Live View HDR mode was not changed: {exc}")
+                if hdr_enabled:
+                    raise
+                self._set_var_async(self.hdr_status_var, "Live HDR: check failed")
 
             if self.controller.is_gain_writable():
                 try:
@@ -3050,31 +3276,35 @@ class HeraTriggerApp(tk.Tk):
                 actual_exposure = self.controller.get_exposure_ms()
                 self._log_async(f"Exposure is read-only on this device. Current exposure: {actual_exposure:.3f} ms")
 
-            if self.controller.is_roi_writable():
-                self.controller.set_roi(roi_x, roi_y, roi_w, roi_h)
-                actual_roi = self.controller.get_roi()
-                self.last_applied_roi = actual_roi
-                self._log_async(f"Set ROI: requested=({roi_x}, {roi_y}, {roi_w}, {roi_h}), actual={actual_roi}")
-                if actual_roi != (roi_x, roi_y, roi_w, roi_h):
-                    self._log_async(
-                        "ROI readback differs from the requested ROI. "
-                        "The SDK/camera may have rounded or rejected one of the ROI values."
-                    )
-            else:
-                actual_roi = self.controller.get_roi()
-                self.last_applied_roi = actual_roi
-                self._log_async(f"ROI is read-only on this device. Current ROI: {actual_roi}")
-            try:
-                actual_x, actual_y, actual_w, actual_h = actual_roi
-                if self.roi_selection_active:
-                    self._log_async(
-                        f"Keeping selected export ROI {self.selected_export_roi}; camera ROI readback is "
-                        f"({actual_x}, {actual_y}, {actual_w}, {actual_h})."
-                    )
+            if apply_roi:
+                if self.controller.is_roi_writable():
+                    self.controller.set_roi(roi_x, roi_y, roi_w, roi_h)
+                    actual_roi = self.controller.get_roi()
+                    self.last_applied_roi = actual_roi
+                    self._log_async(f"Set ROI: requested=({roi_x}, {roi_y}, {roi_w}, {roi_h}), actual={actual_roi}")
+                    if actual_roi != (roi_x, roi_y, roi_w, roi_h):
+                        self._log_async(
+                            "ROI readback differs from the requested ROI. "
+                            "The SDK/camera may have rounded or rejected one of the ROI values."
+                        )
                 else:
-                    self._safe_after(0, lambda x=actual_x, y=actual_y, w=actual_w, h=actual_h: self._set_roi_fields(x, y, w, h, update_live=True))
-            except Exception:
-                pass
+                    actual_roi = self.controller.get_roi()
+                    self.last_applied_roi = actual_roi
+                    self._log_async(f"ROI is read-only on this device. Current ROI: {actual_roi}")
+                try:
+                    actual_x, actual_y, actual_w, actual_h = actual_roi
+                    if self.roi_selection_active:
+                        self._log_async(
+                            f"Keeping selected export ROI {self.selected_export_roi}; camera ROI readback is "
+                            f"({actual_x}, {actual_y}, {actual_w}, {actual_h})."
+                        )
+                    else:
+                        self._safe_after(0, lambda x=actual_x, y=actual_y, w=actual_w, h=actual_h: self._set_roi_fields(x, y, w, h, update_live=True))
+                except Exception:
+                    pass
+            else:
+                self.last_applied_roi = None
+                self._log_async("ROI was not changed. Use the ROI controls to select, size, clear, or apply a ROI.")
 
             if bands == 0:
                 bands = self.controller.get_default_output_bands(scan_mode)
@@ -3108,7 +3338,15 @@ class HeraTriggerApp(tk.Tk):
             self.log(f"Selected ROI for exported cube: {self.acquisition_requested_roi}")
         else:
             self.log("No ROI selected for export; hyperspectral cube will use the full returned image.")
-        if not self.apply_parameters(restart_live=False):
+        acquisition_hdr_enabled = bool(self.hdr_enabled_var.get())
+        if acquisition_hdr_enabled:
+            self.log(
+                "Live View HDR is enabled. The Hera SDK accepts this camera setting, but tests on this system "
+                "returned non-HDR hyperspectral raw data and cubes. Acquisition will continue and verify the "
+                "actual HDR flag after the data callback."
+            )
+        self.log("Preparing Hera camera parameters before starting acquisition.")
+        if not self.apply_parameters(restart_live=False, apply_roi=self.roi_selection_active, hdr_enabled=acquisition_hdr_enabled):
             if live_was_running and self.controller and self.controller.connected:
                 self.start_live_view()
                 self.resume_live_after_acquisition = False
@@ -3124,6 +3362,7 @@ class HeraTriggerApp(tk.Tk):
         trigger_mode = self.TRIGGER_MODES[trigger_mode_name]
         averages = int(self.param_vars["averages"].get())
         stabilization = int(self.param_vars["stabilization"].get())
+        self.acquisition_requested_hdr = acquisition_hdr_enabled
 
         self.acquisition_done_event.clear()
         self.acquisition_success = False
@@ -3140,7 +3379,16 @@ class HeraTriggerApp(tk.Tk):
         else:
             self.log(f"Arming Hera SDK acquisition with trigger mode '{trigger_mode_name}'.")
 
-        self.controller.start_hyperspectral_acquisition(scan_mode, trigger_mode, averages, stabilization)
+        use_legacy_internal = acquisition_hdr_enabled and trigger_mode_name == "Internal"
+        if use_legacy_internal:
+            self.log("Using SDK legacy internal acquisition call for HDR, matching the Hera SDK hyperspectral sample.")
+        self.controller.start_hyperspectral_acquisition(
+            scan_mode,
+            trigger_mode,
+            averages,
+            stabilization,
+            use_legacy_internal=use_legacy_internal,
+        )
         self.update_state("Acquiring" if trigger_mode_name == "Internal" else "WaitingForTrigger")
         self.log("Hyperspectral acquisition started.")
 
@@ -3255,7 +3503,7 @@ class HeraTriggerApp(tk.Tk):
         if cycle_index is None:
             export_tag = self._sanitize_export_tag(f"{position.name}_{time.strftime('%Y%m%d_%H%M%S')}")
         else:
-            export_tag = self._sanitize_export_tag(f"cycle_{cycle_index:03d}_{position.name}")
+            export_tag = self._sanitize_export_tag(f"{position.name}_{cycle_index:03d}")
         self._arm_and_start_acquisition(export_tag=export_tag)
         export_path = self._await_acquisition_completion()
         return export_path, confirmed_z, z_status
@@ -3698,7 +3946,19 @@ class HeraTriggerApp(tk.Tk):
         viewer_bound = False
         try:
             width, height, _ = self.controller.get_hyperspectral_data_info(data_handle)
-            self._log_async(f"Raw hyperspectral data received: width={width}, height={height}")
+            data_is_hdr = None
+            try:
+                data_is_hdr = self.controller.get_hyperspectral_data_is_hdr(data_handle)
+            except Exception as exc:
+                self._log_async(f"Could not read raw hyperspectral HDR flag: {exc}")
+            data_hdr_text = "unknown" if data_is_hdr is None else ("on" if data_is_hdr else "off")
+            self._log_async(f"Raw hyperspectral data received: width={width}, height={height}, HDR={data_hdr_text}")
+            if self.acquisition_requested_hdr and data_is_hdr is False:
+                self._log_async(
+                    "Live View HDR was requested and confirmed before acquisition, but the SDK returned "
+                    "non-HDR raw data. This means the SDK/device acquisition pipeline downgraded HDR for "
+                    "this acquisition."
+                )
             if self.last_applied_roi:
                 roi_x, roi_y, roi_w, roi_h = self.last_applied_roi
                 if (width, height) != (roi_w, roi_h):
@@ -3714,6 +3974,17 @@ class HeraTriggerApp(tk.Tk):
 
             hypercube_handle = self.controller.get_hypercube(data_handle, data_type, bands, binning)
             cube_width, cube_height, cube_bands, cube_type = self.controller.get_hypercube_info(hypercube_handle)
+            cube_is_hdr = None
+            try:
+                cube_is_hdr = self.controller.get_hypercube_is_hdr(hypercube_handle)
+            except Exception as exc:
+                self._log_async(f"Could not read hypercube HDR flag: {exc}")
+            cube_hdr_text = "unknown" if cube_is_hdr is None else ("on" if cube_is_hdr else "off")
+            if self.acquisition_requested_hdr and cube_is_hdr is False:
+                self._log_async(
+                    "Live View HDR was requested, but the computed hypercube reports HDR=off. "
+                    "The exported cube will therefore be a normal dynamic-range acquisition."
+                )
             display_roi = None
             display_width = cube_width
             display_height = cube_height
@@ -3729,10 +4000,12 @@ class HeraTriggerApp(tk.Tk):
             self._set_var_async(
                 self.hypercube_summary_var,
                 f"Cube: {display_width} x {display_height}, bands={cube_bands}, type={cube_type}"
+                + f", HDR={cube_hdr_text}"
                 + (f" (ROI x={display_roi[0]}, y={display_roi[1]})" if display_roi else ""),
             )
             self._log_async(
-                f"Hypercube ready: width={cube_width}, height={cube_height}, bands={cube_bands}, dataType={cube_type}"
+                f"Hypercube ready: width={cube_width}, height={cube_height}, bands={cube_bands}, "
+                f"dataType={cube_type}, HDR={cube_hdr_text}"
             )
             if display_roi:
                 self._log_async(
@@ -3749,6 +4022,7 @@ class HeraTriggerApp(tk.Tk):
                 "display_roi": display_roi,
                 "bands": cube_bands,
                 "data_type": cube_type,
+                "is_hdr": cube_is_hdr,
                 "role": self.pending_acquisition_role,
             }
             self.current_hyper_band_cache = {}
@@ -3784,6 +4058,9 @@ class HeraTriggerApp(tk.Tk):
             export_tag = self.pending_export_tag or self._sanitize_export_tag(time.strftime("hera_hypercube_%Y%m%d_%H%M%S"))
             output_path = os.path.join(output_dir, export_tag)
             description = "Generated by AppHeraTriggerPython0417 using Hera SDK and Tango stage control"
+            description = f"{description}\nHyperspectral acquisition HDR flag: {cube_hdr_text}"
+            if self.acquisition_requested_hdr and cube_is_hdr is False:
+                description = f"{description}\nLive View HDR was requested, but SDK returned non-HDR hyperspectral data"
             notes = self.saving_notes_var.get().strip()
             if notes:
                 description = f"{description}\nUser notes: {notes}"
@@ -3876,7 +4153,10 @@ class HeraTriggerApp(tk.Tk):
                 self._safe_after(0, self.start_live_view)
 
     def _log_async(self, message):
-        self._safe_after(0, lambda: self.log(message))
+        if threading.current_thread() is threading.main_thread():
+            self.log(message)
+        else:
+            self._safe_after(0, lambda: self.log(message))
 
     def _set_var_async(self, var, value):
         def setter():
@@ -4032,6 +4312,16 @@ class HeraTriggerApp(tk.Tk):
     def _live_preview_scale(self, width):
         target_w = min(width, self.live_max_preview_width)
         return max(1, math.ceil(width / target_w))
+
+    def _display_saturation_threshold(self, saturation_threshold, bit_depth, bits_per_pixel):
+        threshold = int(saturation_threshold or 0)
+        if threshold <= 0:
+            return None
+        effective_depth = bit_depth if bit_depth > 0 else bits_per_pixel
+        if effective_depth <= 8:
+            return max(0, min(255, threshold))
+        max_value = float((1 << effective_depth) - 1)
+        return max(0, min(255, int(round((threshold / max_value) * 255.0))))
 
     def _extract_live_preview_bytes(self, raw_buffer, width, height, row_stride, bytes_per_pixel, bit_depth, bits_per_pixel, saturation_threshold, scale):
         display_width = max(1, math.ceil(width / scale))
@@ -4438,6 +4728,123 @@ class HeraTriggerApp(tk.Tk):
             canvas.create_line(0, y, width, y, fill=self.theme["canvas_grid"])
         canvas.create_text(width / 2, height / 2 - 14, text="Live View", fill=self.theme["text"], font=("Segoe UI Semibold", 14))
         canvas.create_text(width / 2, height / 2 + 12, text=self.live_view_status_var.get(), fill=self.theme["muted"], font=("Segoe UI", 10))
+        self._render_live_profiles()
+
+    def toggle_live_cross(self):
+        if self.live_cross_enabled_var.get():
+            self.live_profile_status_var.set("Cross: click live image")
+        else:
+            self.live_cross_point = None
+            self.live_profile_status_var.set("Cross: off")
+        self._schedule_live_render(force=True)
+        self._render_live_profiles()
+
+    def _draw_live_cross_overlay(self, canvas):
+        if not self.live_cross_enabled_var.get() or not self.live_cross_point:
+            return
+        with self.live_frame_lock:
+            rect = self.live_display_rect
+            frame_size = self.live_display_frame_size
+        if not rect or not frame_size:
+            return
+        image_x, image_y = self.live_cross_point
+        left, top, out_w, out_h = rect
+        frame_width, frame_height = frame_size
+        if frame_width <= 0 or frame_height <= 0:
+            return
+        cx = left + (image_x + 0.5) * out_w / frame_width
+        cy = top + (image_y + 0.5) * out_h / frame_height
+        if cx < left or cx > left + out_w or cy < top or cy > top + out_h:
+            return
+        color = "#46d66f"
+        canvas.create_line(cx - 10, cy, cx + 10, cy, fill=color, width=2)
+        canvas.create_line(cx, cy - 10, cx, cy + 10, fill=color, width=2)
+        canvas.create_oval(cx - 4, cy - 4, cx + 4, cy + 4, outline=color, width=2)
+
+    def _draw_empty_profile_canvas(self, canvas, text):
+        if not canvas:
+            return
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 10)
+        height = max(canvas.winfo_height(), 10)
+        canvas.create_rectangle(0, 0, width, height, fill=self.theme["canvas"], outline="")
+        canvas.create_text(width / 2, height / 2, text=text, fill=self.theme["muted"], font=("Segoe UI", 9))
+
+    def _render_live_profiles(self):
+        if not hasattr(self, "live_horizontal_profile_canvas") or not hasattr(self, "live_vertical_profile_canvas"):
+            return
+        if not self.live_cross_enabled_var.get():
+            self._draw_empty_profile_canvas(self.live_horizontal_profile_canvas, "Cross off")
+            self._draw_empty_profile_canvas(self.live_vertical_profile_canvas, "Cross off")
+            return
+        with self.live_frame_lock:
+            profile = self.latest_live_profile
+            frame_size = self.live_display_frame_size
+        if not profile or not frame_size or not self.live_cross_point:
+            self._draw_empty_profile_canvas(self.live_horizontal_profile_canvas, "Click live image")
+            self._draw_empty_profile_canvas(self.live_vertical_profile_canvas, "Click live image")
+            return
+        prof_w, prof_h, gray_bytes, threshold = profile
+        frame_w, frame_h = frame_size
+        if prof_w <= 0 or prof_h <= 0 or frame_w <= 0 or frame_h <= 0:
+            return
+        image_x, image_y = self.live_cross_point
+        px = max(0, min(prof_w - 1, int(image_x * prof_w / frame_w)))
+        py = max(0, min(prof_h - 1, int(image_y * prof_h / frame_h)))
+        row_values = gray_bytes[py * prof_w:(py + 1) * prof_w]
+        col_values = gray_bytes[px:prof_w * prof_h:prof_w]
+        self._draw_horizontal_profile(row_values, threshold)
+        self._draw_vertical_profile(col_values, threshold)
+
+    def _draw_horizontal_profile(self, values, threshold):
+        canvas = self.live_horizontal_profile_canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 10)
+        height = max(canvas.winfo_height(), 10)
+        pad = 10
+        canvas.create_rectangle(0, 0, width, height, fill=self.theme["canvas"], outline="")
+        canvas.create_text(8, 8, anchor="nw", text="Horizontal cut", fill=self.theme["muted"], font=("Segoe UI", 8))
+        if threshold is not None:
+            ty = height - pad - (threshold / 255.0) * max(height - 2 * pad, 1)
+            canvas.create_line(pad, ty, width - pad, ty, fill="#e84b4b", width=1)
+        if len(values) < 2:
+            return
+        plot_w = max(width - 2 * pad, 1)
+        plot_h = max(height - 2 * pad, 1)
+        prev = None
+        step = max(1, math.ceil(len(values) / max(plot_w, 1)))
+        sampled = values[::step]
+        for index, value in enumerate(sampled):
+            x = pad + index * plot_w / max(len(sampled) - 1, 1)
+            y = height - pad - (value / 255.0) * plot_h
+            if prev:
+                canvas.create_line(prev[0], prev[1], x, y, fill=self.theme["accent_soft"], width=1)
+            prev = (x, y)
+
+    def _draw_vertical_profile(self, values, threshold):
+        canvas = self.live_vertical_profile_canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 10)
+        height = max(canvas.winfo_height(), 10)
+        pad = 10
+        canvas.create_rectangle(0, 0, width, height, fill=self.theme["canvas"], outline="")
+        canvas.create_text(8, 8, anchor="nw", text="Vertical", fill=self.theme["muted"], font=("Segoe UI", 8))
+        if threshold is not None:
+            tx = pad + (threshold / 255.0) * max(width - 2 * pad, 1)
+            canvas.create_line(tx, pad, tx, height - pad, fill="#e84b4b", width=1)
+        if len(values) < 2:
+            return
+        plot_w = max(width - 2 * pad, 1)
+        plot_h = max(height - 2 * pad, 1)
+        prev = None
+        step = max(1, math.ceil(len(values) / max(plot_h, 1)))
+        sampled = values[::step]
+        for index, value in enumerate(sampled):
+            x = pad + (value / 255.0) * plot_w
+            y = pad + index * plot_h / max(len(sampled) - 1, 1)
+            if prev:
+                canvas.create_line(prev[0], prev[1], x, y, fill=self.theme["accent_soft"], width=1)
+            prev = (x, y)
 
     def _render_live_photo(self):
         if not hasattr(self, "live_view_canvas"):
@@ -4506,6 +4913,8 @@ class HeraTriggerApp(tk.Tk):
                 font=("Segoe UI", 9),
             )
         self._draw_live_roi_overlay(canvas)
+        self._draw_live_cross_overlay(canvas)
+        self._render_live_profiles()
         if not self.live_first_frame_rendered:
             self.live_first_frame_rendered = True
             self._set_live_view_status(f"Live view: displaying {self.live_pixel_format_name}")
@@ -4543,14 +4952,23 @@ class HeraTriggerApp(tk.Tk):
         self._update_live_cursor_readout()
 
     def on_live_mouse_click(self, event):
-        if not self.live_roi_selecting:
-            return
         image_pos = self._live_event_to_image_xy(event)
         if not image_pos:
-            self.live_roi_status_var.set("ROI: click inside live image")
+            if self.live_roi_selecting:
+                self.live_roi_status_var.set("ROI: click inside live image")
+            elif self.live_cross_enabled_var.get():
+                self.live_profile_status_var.set("Cross: click inside live image")
             return
 
         image_x, image_y, frame_width, frame_height = image_pos
+        if not self.live_roi_selecting:
+            if self.live_cross_enabled_var.get():
+                self.live_cross_point = (image_x, image_y)
+                self.live_profile_status_var.set(f"Cross: X={image_x}, Y={image_y}")
+                self._schedule_live_render(force=True)
+                self._render_live_profiles()
+            return
+
         self.live_roi_points.append((image_x, image_y))
         if len(self.live_roi_points) == 1:
             self.live_roi_status_var.set(f"ROI: first corner ({image_x}, {image_y}); click opposite corner")

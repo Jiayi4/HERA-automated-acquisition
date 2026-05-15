@@ -27,7 +27,7 @@ The current implementation is focused on software-triggered acquisition and is s
 - live-safe parameter apply that pauses live capture before changing gain, exposure, or ROI, then restarts it
 - live cursor readout that maps image pixels to sample/stage X/Y using a configurable pixel scale and axis orientation
 - live-view ROI workflow: click two corners on the live image or edit ROI fields, then use that selected area for ROI export and hyperspectral display
-- live-view exposure helpers: auto-contrast display, red saturation overlay, and PNG snapshot export of the current displayed frame
+- live-view exposure helpers: auto-contrast display, red saturation overlay, crosshair row/column intensity plots, and PNG snapshot export of the current displayed frame
 - adjustable three-pane interface with light/dark mode switching
 - editable ROI corners, ROI width/height, and ROI area helpers
 - asynchronous acquisition callback handling
@@ -136,8 +136,11 @@ The Live View tab includes controls for choosing an ROI and judging exposure bef
 - `Clear ROI`: resets the ROI workflow to full-image export/display when a live frame is available.
 - `Auto Contrast`: display-only contrast stretching for the live preview. It helps make dim frames visible and does not change camera exposure, gain, or saved acquisition data.
 - `Show Saturation`: overlays saturated live-preview pixels in red using the saturation threshold returned by `HeraAPI_GetLiveCaptureInfo`.
+- `Cross`: enables a fixed green point on the live image and displays the selected row and column intensity cuts. The bottom plot shows the horizontal cut, the right plot shows the vertical cut, and the red line marks the SDK live-frame saturation threshold.
 - `Gamma`: display-only brightness response control applied after auto-contrast. `1.0` is neutral; higher values brighten shadows and lower values darken the display. `Reset Gamma` returns it to `1.0`.
 - `Snapshot`: saves the latest live frame as a PNG. The file uses the current display choices, so auto-contrast and the red saturation overlay are included when enabled. It saves the live image content, not the canvas text labels or ROI outline.
+
+The `Live View HDR` checkbox controls the camera HDR mode used by live preview. On the tested Hera Kinetix MC setup, the SDK accepts HDR for live frames (`Mono16`, HDR on), but hyperspectral data and hypercubes still report `HDR=off` through `HeraAPI_GetHyperspectralDataIsHDR` and `HeraAPI_GetHyperCubeIsHDR`. The app logs that downgrade and writes the actual hyperspectral HDR flag into the ENVI description, so saved cubes are not mislabeled as HDR.
 
 The saving panel includes a notes field. These notes are written into the ENVI export description when a hyperspectral cube is saved.
 
