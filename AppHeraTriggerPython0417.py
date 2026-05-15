@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zlib
 import tkinter as tk
 from base64 import b64encode
 from dataclasses import dataclass
@@ -1077,9 +1078,16 @@ class HeraTriggerApp(tk.Tk):
         self.live_photo = None
         self.live_frame_info = None
         self.latest_live_frame = None
+        self.live_autocontrast_var = tk.BooleanVar(value=True)
+        self.live_show_saturation_var = tk.BooleanVar(value=False)
         self.live_display_rect = None
         self.live_display_frame_size = None
         self.live_cursor_image_xy = None
+        self.live_roi_selecting = False
+        self.live_roi_points = []
+        self.live_roi_rect = None
+        self.live_roi_button_var = tk.StringVar(value="Select ROI")
+        self.live_roi_status_var = tk.StringVar(value="ROI: -")
         self.latest_stage_xy = None
         self.live_pixel_format_name = "Unknown"
         self.live_first_frame_logged = False
@@ -1483,8 +1491,21 @@ class HeraTriggerApp(tk.Tk):
         live_cursor_bar.pack(fill="x", padx=8, pady=(8, 4))
         tk.Label(live_cursor_bar, textvariable=self.live_cursor_var, fg="#e7edf5", bg=self.theme["panel"],
                  font=("Segoe UI Semibold", 10)).pack(side="left")
+        tk.Checkbutton(live_cursor_bar, text="Auto Contrast", variable=self.live_autocontrast_var,
+                       command=lambda: self._schedule_live_render(force=True),
+                       bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
+                       activebackground=self.theme["panel"]).pack(side="left", padx=(12, 0))
+        tk.Checkbutton(live_cursor_bar, text="Show Saturation", variable=self.live_show_saturation_var,
+                       command=lambda: self._schedule_live_render(force=True),
+                       bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
+                       activebackground=self.theme["panel"]).pack(side="left", padx=(8, 0))
+        tk.Button(live_cursor_bar, text="Snapshot", command=self.snapshot_live_view).pack(side="left", padx=(8, 0))
+        tk.Button(live_cursor_bar, textvariable=self.live_roi_button_var, command=self.toggle_live_roi_selection).pack(side="right")
+        tk.Button(live_cursor_bar, text="Clear ROI", command=self.clear_live_roi_selection).pack(side="right", padx=(0, 6))
+        tk.Label(live_cursor_bar, textvariable=self.live_roi_status_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="right", padx=(0, 10))
         self.live_view_canvas = tk.Canvas(live_tab, bg="#101418", highlightthickness=0)
         self.live_view_canvas.bind("<Motion>", self.on_live_mouse_move)
+        self.live_view_canvas.bind("<Button-1>", self.on_live_mouse_click)
         self.live_view_canvas.bind("<Leave>", self.on_live_mouse_leave)
         self.live_view_canvas.pack(fill="both", expand=True)
         hyper_controls = tk.Frame(hyper_tab, bg=self.theme["panel"])
@@ -2151,11 +2172,12 @@ class HeraTriggerApp(tk.Tk):
             bit_depth = info["bit_depth"]
             row_stride = info["row_stride"]
             bits_per_pixel = info["bits_per_pixel"]
+            saturation_threshold = info["saturation_threshold"]
             bytes_per_pixel = max(1, (bits_per_pixel + 7) // 8)
             raw_size = row_stride * height
             raw_buffer = ctypes.string_at(info["data_ptr"], raw_size)
             scale = self._live_preview_scale(width)
-            display_bytes, disp_width, disp_height = self._extract_live_preview_bytes(
+            display_bytes, disp_width, disp_height, saturation_mask = self._extract_live_preview_bytes(
                 raw_buffer,
                 width,
                 height,
@@ -2163,13 +2185,14 @@ class HeraTriggerApp(tk.Tk):
                 bytes_per_pixel,
                 bit_depth,
                 bits_per_pixel,
+                saturation_threshold,
                 scale,
             )
-            display_bytes, preview_min, preview_max = self._normalize_grayscale_for_display(display_bytes)
+            _, preview_min, preview_max = self._normalize_grayscale_for_display(display_bytes)
 
             with self.live_frame_lock:
                 self.live_frame_info = (width, height, bits_per_pixel)
-                self.latest_live_frame = (disp_width, disp_height, display_bytes)
+                self.latest_live_frame = (disp_width, disp_height, display_bytes, saturation_mask)
             self._set_live_view_status(f"Live view: receiving {self.live_pixel_format_name}")
             if not self.live_first_frame_logged:
                 self.live_first_frame_logged = True
@@ -3039,19 +3062,30 @@ class HeraTriggerApp(tk.Tk):
         target_w = min(width, self.live_max_preview_width)
         return max(1, math.ceil(width / target_w))
 
-    def _extract_live_preview_bytes(self, raw_buffer, width, height, row_stride, bytes_per_pixel, bit_depth, bits_per_pixel, scale):
+    def _extract_live_preview_bytes(self, raw_buffer, width, height, row_stride, bytes_per_pixel, bit_depth, bits_per_pixel, saturation_threshold, scale):
         display_width = max(1, math.ceil(width / scale))
         display_height = max(1, math.ceil(height / scale))
         pixel_row_bytes = width * bytes_per_pixel
         raw_view = memoryview(raw_buffer)
+        saturation_mask = bytearray(display_width * display_height)
+        saturation_threshold = int(saturation_threshold or 0)
 
         if bytes_per_pixel == 1:
             sampled_rows = []
+            dst_index = 0
             for row_index in range(0, height, scale):
                 row_start = row_index * row_stride
                 row_end = row_start + pixel_row_bytes
-                sampled_rows.append(bytes(raw_view[row_start:row_end:scale]))
-            return b"".join(sampled_rows), display_width, len(sampled_rows)
+                row_samples = raw_view[row_start:row_end:scale]
+                sampled_rows.append(bytes(row_samples))
+                if saturation_threshold > 0:
+                    for sample in row_samples:
+                        if sample >= saturation_threshold and dst_index < len(saturation_mask):
+                            saturation_mask[dst_index] = 1
+                        dst_index += 1
+            sampled = b"".join(sampled_rows)
+            display_height = max(1, len(sampled) // display_width)
+            return sampled, display_width, display_height, bytes(saturation_mask[:len(sampled)])
 
         if bytes_per_pixel == 2:
             effective_depth = bit_depth if bit_depth > 0 else bits_per_pixel
@@ -3063,13 +3097,15 @@ class HeraTriggerApp(tk.Tk):
                 row_end = row_start + pixel_row_bytes
                 row_samples = raw_view[row_start:row_end].cast("H")
                 for sample in row_samples[::scale]:
+                    if saturation_threshold > 0 and sample >= saturation_threshold:
+                        saturation_mask[dst_index] = 1
                     if shift:
                         sample = sample >> shift
                     if sample > 255:
                         sample = 255
                     sampled[dst_index] = sample
                     dst_index += 1
-            return bytes(sampled[:dst_index]), display_width, max(1, dst_index // display_width)
+            return bytes(sampled[:dst_index]), display_width, max(1, dst_index // display_width), bytes(saturation_mask[:dst_index])
 
         effective_depth = bit_depth if bit_depth > 0 else bits_per_pixel
         max_value = float((1 << effective_depth) - 1) if effective_depth > 0 else 65535.0
@@ -3082,9 +3118,11 @@ class HeraTriggerApp(tk.Tk):
             for column_index in range(0, width, scale):
                 src_index = column_index * bytes_per_pixel
                 sample = int.from_bytes(row_bytes[src_index:src_index + bytes_per_pixel], "little", signed=False)
+                if saturation_threshold > 0 and sample >= saturation_threshold:
+                    saturation_mask[dst_index] = 1
                 sampled[dst_index] = max(0, min(255, int(round((sample / max_value) * 255.0))))
                 dst_index += 1
-        return bytes(sampled[:dst_index]), display_width, max(1, dst_index // display_width)
+        return bytes(sampled[:dst_index]), display_width, max(1, dst_index // display_width), bytes(saturation_mask[:dst_index])
 
     def _resample_grayscale_nearest(self, src_bytes, src_width, src_height, dst_width, dst_height):
         if (src_width, src_height) == (dst_width, dst_height):
@@ -3113,22 +3151,122 @@ class HeraTriggerApp(tk.Tk):
         )
         return normalized, min_value, max_value
 
-    def _make_ppm_photo_from_grayscale(self, gray_bytes, src_width, src_height, dest_width, dest_height):
-        out_w, out_h = self._fit_dimensions(src_width, src_height, dest_width, dest_height)
-        scaled = self._resample_grayscale_nearest(gray_bytes, src_width, src_height, out_w, out_h)
-        ppm_payload = bytearray(len(scaled) * 3)
+    def _grayscale_to_rgb_bytes(self, gray_bytes, src_width, src_height, dest_width, dest_height, saturation_mask=None):
+        scaled = self._resample_grayscale_nearest(gray_bytes, src_width, src_height, dest_width, dest_height)
+        scaled_mask = None
+        if saturation_mask:
+            scaled_mask = self._resample_grayscale_nearest(saturation_mask, src_width, src_height, dest_width, dest_height)
+        rgb_payload = bytearray(len(scaled) * 3)
         dst_index = 0
-        for value in scaled:
-            ppm_payload[dst_index] = value
-            ppm_payload[dst_index + 1] = value
-            ppm_payload[dst_index + 2] = value
+        for index, value in enumerate(scaled):
+            if scaled_mask and scaled_mask[index]:
+                rgb_payload[dst_index] = 255
+                rgb_payload[dst_index + 1] = 0
+                rgb_payload[dst_index + 2] = 0
+            else:
+                rgb_payload[dst_index] = value
+                rgb_payload[dst_index + 1] = value
+                rgb_payload[dst_index + 2] = value
             dst_index += 3
+        return bytes(rgb_payload)
+
+    def _make_ppm_photo_from_grayscale(self, gray_bytes, src_width, src_height, dest_width, dest_height, saturation_mask=None):
+        out_w, out_h = self._fit_dimensions(src_width, src_height, dest_width, dest_height)
+        ppm_payload = self._grayscale_to_rgb_bytes(gray_bytes, src_width, src_height, out_w, out_h, saturation_mask)
         ppm_bytes = f"P6\n{out_w} {out_h}\n255\n".encode("ascii") + bytes(ppm_payload)
         try:
             photo = tk.PhotoImage(data=ppm_bytes, format="PPM")
         except tk.TclError:
             photo = tk.PhotoImage(data=b64encode(ppm_bytes), format="PPM")
         return photo, out_w, out_h
+
+    def _png_chunk(self, chunk_type, payload):
+        chunk_name = chunk_type.encode("ascii")
+        checksum = zlib.crc32(chunk_name + payload) & 0xFFFFFFFF
+        return (
+            len(payload).to_bytes(4, "big")
+            + chunk_name
+            + payload
+            + checksum.to_bytes(4, "big")
+        )
+
+    def _write_rgb_png(self, path, rgb_payload, width, height):
+        row_stride = width * 3
+        raw_rows = bytearray((row_stride + 1) * height)
+        dst_index = 0
+        for row_index in range(height):
+            raw_rows[dst_index] = 0
+            dst_index += 1
+            row_start = row_index * row_stride
+            raw_rows[dst_index:dst_index + row_stride] = rgb_payload[row_start:row_start + row_stride]
+            dst_index += row_stride
+
+        ihdr = (
+            width.to_bytes(4, "big")
+            + height.to_bytes(4, "big")
+            + bytes([8, 2, 0, 0, 0])
+        )
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n"
+            + self._png_chunk("IHDR", ihdr)
+            + self._png_chunk("IDAT", zlib.compress(bytes(raw_rows)))
+            + self._png_chunk("IEND", b"")
+        )
+        with open(path, "wb") as handle:
+            handle.write(png_bytes)
+
+    def snapshot_live_view(self):
+        with self.live_frame_lock:
+            frame = self.latest_live_frame
+        if not frame:
+            messagebox.showinfo("Live Snapshot", "Start live view first, then take a snapshot.")
+            return
+
+        if len(frame) == 4:
+            src_width, src_height, gray_bytes, saturation_mask = frame
+        else:
+            src_width, src_height, gray_bytes = frame
+            saturation_mask = None
+
+        if self.live_autocontrast_var.get():
+            render_bytes, _, _ = self._normalize_grayscale_for_display(gray_bytes)
+        else:
+            render_bytes = gray_bytes
+        render_mask = saturation_mask if self.live_show_saturation_var.get() else None
+
+        default_dir = self.param_vars.get("output_path").get() if "output_path" in self.param_vars else ""
+        if not default_dir or not os.path.isdir(default_dir):
+            default_dir = os.path.abspath(os.path.dirname(__file__))
+        default_name = f"hera_live_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        snapshot_path = filedialog.asksaveasfilename(
+            title="Save live snapshot",
+            initialdir=default_dir,
+            initialfile=default_name,
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png"), ("All files", "*.*")],
+        )
+        if not snapshot_path:
+            return
+        if not os.path.splitext(snapshot_path)[1]:
+            snapshot_path += ".png"
+
+        try:
+            rgb_payload = self._grayscale_to_rgb_bytes(
+                render_bytes,
+                src_width,
+                src_height,
+                src_width,
+                src_height,
+                render_mask,
+            )
+            self._write_rgb_png(snapshot_path, rgb_payload, src_width, src_height)
+        except Exception as exc:
+            messagebox.showerror("Live Snapshot", f"Could not save snapshot:\n{exc}")
+            self.log(f"Live snapshot failed: {exc}")
+            return
+
+        self.log(f"Live snapshot saved: {snapshot_path}")
+        self._set_live_view_status(f"Live snapshot saved: {os.path.basename(snapshot_path)}")
 
     def _clear_hypercube_viewer(self):
         if self.current_hypercube_handle and self.controller:
@@ -3280,16 +3418,26 @@ class HeraTriggerApp(tk.Tk):
                 self.live_render_pending = False
             return
         try:
-            src_width, src_height, gray_bytes = frame
+            if len(frame) == 4:
+                src_width, src_height, gray_bytes, saturation_mask = frame
+            else:
+                src_width, src_height, gray_bytes = frame
+                saturation_mask = None
+            if self.live_autocontrast_var.get():
+                render_bytes, _, _ = self._normalize_grayscale_for_display(gray_bytes)
+            else:
+                render_bytes = gray_bytes
+            render_mask = saturation_mask if self.live_show_saturation_var.get() else None
             canvas = self.live_view_canvas
             width = max(canvas.winfo_width(), 10)
             height = max(canvas.winfo_height(), 10)
             self.live_photo, out_w, out_h = self._make_ppm_photo_from_grayscale(
-                gray_bytes,
+                render_bytes,
                 src_width,
                 src_height,
                 max(width - 16, 1),
                 max(height - 16, 1),
+                render_mask,
             )
         except tk.TclError as exc:
             with self.live_frame_lock:
@@ -3327,6 +3475,7 @@ class HeraTriggerApp(tk.Tk):
             stage_text = self.stage_position_var.get() if hasattr(self, "stage_position_var") else ""
             if stage_text:
                 canvas.create_text(12, 30, anchor="nw", text=stage_text, fill="#9aa6b2", font=("Segoe UI", 9))
+        self._draw_live_roi_overlay(canvas)
         if not self.live_first_frame_rendered:
             self.live_first_frame_rendered = True
             self._set_live_view_status(f"Live view: displaying {self.live_pixel_format_name}")
@@ -3335,31 +3484,145 @@ class HeraTriggerApp(tk.Tk):
             self.last_live_render_time = time.time()
             self.live_render_pending = False
 
-    def on_live_mouse_move(self, event):
+    def _live_event_to_image_xy(self, event):
         with self.live_frame_lock:
             rect = self.live_display_rect
             frame_size = self.live_display_frame_size
         if not rect or not frame_size:
-            self.live_cursor_var.set("Live cursor: -")
-            return
+            return None
 
         left, top, out_w, out_h = rect
         frame_width, frame_height = frame_size
         if out_w <= 0 or out_h <= 0 or frame_width <= 0 or frame_height <= 0:
-            self.live_cursor_var.set("Live cursor: -")
-            return
+            return None
         if event.x < left or event.x >= left + out_w or event.y < top or event.y >= top + out_h:
-            self.live_cursor_var.set("Live cursor: outside image")
-            return
+            return None
 
         image_x = min(max(int((event.x - left) * frame_width / out_w), 0), frame_width - 1)
         image_y = min(max(int((event.y - top) * frame_height / out_h), 0), frame_height - 1)
+        return image_x, image_y, frame_width, frame_height
+
+    def on_live_mouse_move(self, event):
+        image_pos = self._live_event_to_image_xy(event)
+        if not image_pos:
+            self.live_cursor_var.set("Live cursor: -")
+            return
+
+        image_x, image_y, frame_width, frame_height = image_pos
         self.live_cursor_image_xy = (image_x, image_y, frame_width, frame_height)
         self._update_live_cursor_readout()
+
+    def on_live_mouse_click(self, event):
+        if not self.live_roi_selecting:
+            return
+        image_pos = self._live_event_to_image_xy(event)
+        if not image_pos:
+            self.live_roi_status_var.set("ROI: click inside live image")
+            return
+
+        image_x, image_y, frame_width, frame_height = image_pos
+        self.live_roi_points.append((image_x, image_y))
+        if len(self.live_roi_points) == 1:
+            self.live_roi_status_var.set(f"ROI: first corner ({image_x}, {image_y}); click opposite corner")
+            self._draw_live_view_placeholder()
+            return
+
+        (x0, y0), (x1, y1) = self.live_roi_points[:2]
+        left = min(x0, x1)
+        top = min(y0, y1)
+        right = max(x0, x1)
+        bottom = max(y0, y1)
+        width = min(frame_width - left, right - left + 1)
+        height = min(frame_height - top, bottom - top + 1)
+        self.live_roi_rect = (left, top, width, height)
+        self.live_roi_points = []
+        self.live_roi_selecting = False
+        self.live_roi_button_var.set("Select ROI")
+
+        self.param_vars["roi_x"].set(left)
+        self.param_vars["roi_y"].set(top)
+        self.param_vars["roi_w"].set(width)
+        self.param_vars["roi_h"].set(height)
+        self.live_roi_status_var.set(f"ROI: x={left}, y={top}, w={width}, h={height}")
+        self.log(f"Live ROI selected: x={left}, y={top}, width={width}, height={height}. Press Apply Parameters to send it to Hera.")
+        self._draw_live_view_placeholder()
 
     def on_live_mouse_leave(self, _event=None):
         self.live_cursor_image_xy = None
         self.live_cursor_var.set("Live cursor: -")
+
+    def toggle_live_roi_selection(self):
+        self.live_roi_selecting = not self.live_roi_selecting
+        self.live_roi_points = []
+        if self.live_roi_selecting:
+            self.live_roi_button_var.set("Cancel ROI")
+            self.live_roi_status_var.set("ROI: click first corner")
+        else:
+            self.live_roi_button_var.set("Select ROI")
+            self.live_roi_status_var.set("ROI: selection cancelled" if self.live_roi_rect is None else self._format_live_roi_status())
+        self._draw_live_view_placeholder()
+
+    def clear_live_roi_selection(self):
+        self.live_roi_selecting = False
+        self.live_roi_points = []
+        self.live_roi_rect = None
+        self.live_roi_button_var.set("Select ROI")
+        with self.live_frame_lock:
+            frame_size = self.live_display_frame_size
+        if frame_size:
+            frame_width, frame_height = frame_size
+            self.param_vars["roi_x"].set(0)
+            self.param_vars["roi_y"].set(0)
+            self.param_vars["roi_w"].set(frame_width)
+            self.param_vars["roi_h"].set(frame_height)
+            self.live_roi_status_var.set(f"ROI: full frame {frame_width} x {frame_height}")
+            self.log(f"Live ROI cleared to full frame: width={frame_width}, height={frame_height}. Press Apply Parameters to send it to Hera.")
+        else:
+            self.live_roi_status_var.set("ROI: -")
+        self._draw_live_view_placeholder()
+
+    def _format_live_roi_status(self):
+        if not self.live_roi_rect:
+            return "ROI: -"
+        x, y, width, height = self.live_roi_rect
+        return f"ROI: x={x}, y={y}, w={width}, h={height}"
+
+    def _image_xy_to_canvas_xy(self, image_x, image_y):
+        with self.live_frame_lock:
+            rect = self.live_display_rect
+            frame_size = self.live_display_frame_size
+        if not rect or not frame_size:
+            return None
+        left, top, out_w, out_h = rect
+        frame_width, frame_height = frame_size
+        if frame_width <= 0 or frame_height <= 0:
+            return None
+        canvas_x = left + (image_x + 0.5) * out_w / frame_width
+        canvas_y = top + (image_y + 0.5) * out_h / frame_height
+        return canvas_x, canvas_y
+
+    def _draw_live_roi_overlay(self, canvas):
+        corners = []
+        if self.live_roi_rect:
+            x, y, width, height = self.live_roi_rect
+            corners = [(x, y), (x + width - 1, y + height - 1)]
+        elif self.live_roi_selecting and self.live_roi_points:
+            x, y = self.live_roi_points[0]
+            corners = [(x, y), (x, y)]
+        if not corners:
+            return
+
+        p0 = self._image_xy_to_canvas_xy(*corners[0])
+        p1 = self._image_xy_to_canvas_xy(*corners[1])
+        if not p0 or not p1:
+            return
+        x0, y0 = p0
+        x1, y1 = p1
+        if abs(x1 - x0) < 2 and abs(y1 - y0) < 2:
+            canvas.create_line(x0 - 8, y0, x0 + 8, y0, fill="#7ad97a", width=2)
+            canvas.create_line(x0, y0 - 8, x0, y0 + 8, fill="#7ad97a", width=2)
+            return
+        canvas.create_rectangle(x0, y0, x1, y1, outline="#7ad97a", width=2)
 
     def _update_live_cursor_readout(self):
         cursor = self.live_cursor_image_xy

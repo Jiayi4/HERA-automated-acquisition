@@ -26,6 +26,8 @@ The current implementation is focused on software-triggered acquisition and is s
 - graceful handling of read-only camera parameters
 - live-safe parameter apply that pauses live capture before changing gain, exposure, or ROI, then restarts it
 - live cursor readout that maps image pixels to sample/stage X/Y using a configurable pixel scale and axis orientation
+- live-view ROI workflow: click two corners on the live image, copy the ROI into camera parameter fields, then apply it safely
+- live-view exposure helpers: auto-contrast display, red saturation overlay, and PNG snapshot export of the current displayed frame
 - asynchronous acquisition callback handling
 - hypercube generation with `HeraAPI_GetHyperCubeEx`
 - ENVI export to a user-selected output folder
@@ -108,6 +110,16 @@ The **Stage Control > Live Cursor Sample Mapping** panel controls this conversio
 - `Swap XY`: swap image X/Y before applying the stage conversion.
 
 The conversion assumes the current Tango stage X/Y corresponds to the center of the live frame. If the stage moves while the mouse stays over the same live pixel, the displayed sample X/Y updates with the latest stage position.
+
+## Live View ROI And Exposure Checks
+
+The Live View tab includes controls for choosing an ROI and judging exposure before a hyperspectral acquisition.
+
+- `Select ROI`: click two opposite corners on the live image. The app converts those clicks into image-pixel ROI values and fills the `ROI X`, `ROI Y`, `ROI W`, and `ROI H` parameter fields. Press `Apply Parameters` afterward to send the ROI to the camera. If live view is running, the app pauses live capture, applies the parameters, reads values back, and restarts live view.
+- `Clear ROI`: resets the ROI fields to the full current live-frame size when a live frame is available.
+- `Auto Contrast`: display-only contrast stretching for the live preview. It helps make dim frames visible and does not change camera exposure, gain, or saved acquisition data.
+- `Show Saturation`: overlays saturated live-preview pixels in red using the saturation threshold returned by `HeraAPI_GetLiveCaptureInfo`.
+- `Snapshot`: saves the latest live frame as a PNG. The file uses the current display choices, so auto-contrast and the red saturation overlay are included when enabled. It saves the live image content, not the canvas text labels or ROI outline.
 
 ## NIS Z Bridge
 

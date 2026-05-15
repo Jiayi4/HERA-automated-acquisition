@@ -102,6 +102,8 @@ ERROR message here
 - The HERA app must reset pending Z request state after timeout/failure and should fully exit on close to avoid duplicate HERA app instances.
 - HERA live capture can make gain/exposure/ROI read-only or slow to stop. Keep parameter apply off the Tk main thread: pause live capture in a worker, apply camera settings, then schedule UI updates and live restart back on Tk.
 - Live cursor sample coordinates are not provided by the Hera SDK directly. The app maps canvas mouse coordinates to live-frame pixels, then converts pixel offset from image center into Tango sample X/Y using `Stage units / pixel`, `Invert X`, `Invert Y`, and `Swap XY`.
+- Live ROI selection is display-driven: two clicks on the rendered live image are mapped back to Hera live-frame pixels and copied into the ROI parameter fields. The ROI is only sent to the camera when the user presses `Apply Parameters`.
+- Live exposure helpers are display-only. `Auto Contrast` stretches the rendered preview, `Show Saturation` paints saturated pixels red from the SDK live-frame saturation threshold, and `Snapshot` writes the latest live frame as a PNG with those display choices applied. These controls must not alter camera exposure, gain, ROI, or acquisition data.
 
 ## NIS PC Update From GitHub
 
