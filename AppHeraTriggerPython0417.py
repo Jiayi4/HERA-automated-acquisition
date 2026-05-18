@@ -1136,9 +1136,9 @@ class HeraTriggerApp(tk.Tk):
         "Error": "Error",
     }
 
-    SCAN_MODES = {"Short": 0, "Medium": 1, "Long": 2, "ExtraLong": 3}
+    SCAN_MODES = {"Low": 0, "Medium": 1, "High": 2, "Extra High": 3}
     TRIGGER_MODES = {"Internal": 0, "DeferredStartExtLineHi": 1, "StepScanExtLoHi": 2}
-    BINNING_OPTIONS = {"None": 0, "2x": 1, "4x": 2, "8x": 3, "2x Enhanced": 0x1000, "4x Enhanced": 0x1001}
+    BINNING_OPTIONS = {"None": 0, "2x": 1, "4x": 2, "8x": 3, "2x Sharp": 0x1000, "4x Sharp": 0x1001}
     DATA_TYPES = {"SinglePrecision": 0, "DoublePrecision": 1}
     LIVE_PIXEL_FORMATS = {
         0: "Mono8",
@@ -1208,7 +1208,7 @@ class HeraTriggerApp(tk.Tk):
         self.live_profile_status_var = tk.StringVar(value="Cross: center")
         self.live_cross_point = None
         self.live_gamma_var = tk.DoubleVar(value=1.0)
-        self.live_gamma_label_var = tk.StringVar(value="Gamma 1.0")
+        self.live_gamma_label_var = tk.StringVar(value="Gamma Value 1.0")
         self.live_zoom_factor = 1.0
         self.live_zoom_label_var = tk.StringVar(value="Zoom 100%")
         self.live_pan_x = 0.0
@@ -1247,9 +1247,13 @@ class HeraTriggerApp(tk.Tk):
         self.current_hypercube_handle = None
         self.current_hypercube_info = None
         self.current_hyper_band_cache = {}
+        self.current_hyper_spectrum_cache = {}
+        self.hyper_selected_pixel = None
+        self.hyper_display_rect = None
         self.flatfield_hypercube_handle = None
         self.flatfield_info = None
         self.flatfield_status_var = tk.StringVar(value="Flatfield: none")
+        self.use_flatfield_var = tk.BooleanVar(value=True)
         self.pending_acquisition_role = "sample"
         self.pending_save_context = None
         self.pending_acquisition_auto_save = True
@@ -1406,16 +1410,16 @@ class HeraTriggerApp(tk.Tk):
         body = tk.PanedWindow(shell, orient="horizontal", sashwidth=8, sashrelief="flat", bg=self.theme["bg"], bd=0)
         body.pack(fill="both", expand=True)
 
-        left = self._make_scroll_column(body, width=330)
-        body.add(left, minsize=260, width=330, stretch="never")
+        left = self._make_scroll_column(body, width=300)
+        body.add(left, minsize=240, width=300, stretch="never")
 
         center = tk.Frame(body, bg=self.theme["bg"], padx=10)
         center.grid_rowconfigure(1, weight=1)
         center.grid_columnconfigure(0, weight=1)
         body.add(center, minsize=560, stretch="always")
 
-        right = self._make_scroll_column(body, width=315)
-        body.add(right, minsize=245, width=315, stretch="never")
+        right = self._make_scroll_column(body, width=285)
+        body.add(right, minsize=230, width=285, stretch="never")
 
         self._build_left_controls(left.content)
         self._build_center_workspace(center)
@@ -1518,12 +1522,12 @@ class HeraTriggerApp(tk.Tk):
         exposure = tk.LabelFrame(parent, text="Exposure", padx=8, pady=8)
         exposure.pack(fill="x", pady=(0, 10))
         exposure.grid_columnconfigure(1, weight=1)
-        self._param_entry(exposure, 0, "Gain level (0-1):", "gain", 0.0)
-        self._param_entry(exposure, 1, "Exposure (ms):", "exposure", 1.0)
+        self._param_entry(exposure, 0, "Gain [dB]:", "gain", 0.0)
+        self._param_entry(exposure, 1, "Exposure [ms]:", "exposure", 1.0)
         tk.Checkbutton(exposure, text="HDR", variable=self.hdr_enabled_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        tk.Button(exposure, text="Apply Exposure/HDR", command=self.apply_parameters_async).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        tk.Button(exposure, text="Apply", command=self.apply_parameters_async).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
-        roi = tk.LabelFrame(parent, text="Region Of Interest", padx=8, pady=8)
+        roi = tk.LabelFrame(parent, text="ROI", padx=8, pady=8)
         roi.pack(fill="x", pady=(0, 10))
         roi.grid_columnconfigure(1, weight=1)
         for _k, _v in [("roi_x", 0), ("roi_y", 0), ("roi_w", 512), ("roi_h", 512)]:
@@ -1531,10 +1535,10 @@ class HeraTriggerApp(tk.Tk):
         corners = tk.LabelFrame(roi, text="Corners", padx=6, pady=6)
         corners.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 0))
         corner_rows = [
-            ("Top left", self.roi_tl_x_var, self.roi_tl_y_var),
-            ("Top right", self.roi_tr_x_var, self.roi_tr_y_var),
-            ("Bottom right", self.roi_br_x_var, self.roi_br_y_var),
-            ("Bottom left", self.roi_bl_x_var, self.roi_bl_y_var),
+            ("Top Left", self.roi_tl_x_var, self.roi_tl_y_var),
+            ("Top Right", self.roi_tr_x_var, self.roi_tr_y_var),
+            ("Bottom Right", self.roi_br_x_var, self.roi_br_y_var),
+            ("Bottom Left", self.roi_bl_x_var, self.roi_bl_y_var),
         ]
         for corner_row, (label, x_var, y_var) in enumerate(corner_rows):
             tk.Label(corners, text=label).grid(row=corner_row, column=0, sticky="w", pady=1)
@@ -1542,15 +1546,15 @@ class HeraTriggerApp(tk.Tk):
             tk.Entry(corners, textvariable=x_var, width=7).grid(row=corner_row, column=2, sticky="w")
             tk.Label(corners, text="Y").grid(row=corner_row, column=3, sticky="e", padx=(6, 2))
             tk.Entry(corners, textvariable=y_var, width=7).grid(row=corner_row, column=4, sticky="w")
-        tk.Button(corners, text="Use Corners", command=self.apply_roi_from_corners).grid(row=4, column=0, columnspan=5, sticky="ew", pady=(6, 0))
+        tk.Button(corners, text="Apply", command=self.apply_roi_from_corners).grid(row=4, column=0, columnspan=5, sticky="ew", pady=(6, 0))
         area_row = tk.Frame(roi)
         area_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         tk.Label(area_row, text="Area (px2)").pack(side="left")
         tk.Entry(area_row, textvariable=self.roi_area_var, width=9).pack(side="left", padx=(6, 4))
-        tk.Button(area_row, text="Set Area", command=self.apply_roi_from_area).pack(side="left")
+        tk.Button(area_row, text="Apply", command=self.apply_roi_from_area).pack(side="left")
         roi_actions = tk.Frame(roi)
         roi_actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        tk.Button(roi_actions, text="Use Size", command=self.apply_roi_from_size).pack(side="left", padx=(0, 4))
+        tk.Button(roi_actions, text="Size", command=self.apply_roi_from_size).pack(side="left", padx=(0, 4))
         tk.Button(roi_actions, textvariable=self.live_roi_button_var, command=self.toggle_live_roi_selection).pack(side="left", padx=(0, 4))
         tk.Button(roi_actions, text="Clear", command=self.clear_live_roi_selection).pack(side="left")
         tk.Label(roi, textvariable=self.live_roi_status_var, fg=self.theme["muted"], wraplength=250, justify="left").grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
@@ -1630,9 +1634,9 @@ class HeraTriggerApp(tk.Tk):
         self._build_nis_z_ui(parent)
 
     def _build_center_workspace(self, parent):
-        spectral = tk.LabelFrame(parent, text="Spectral / Hypercube Settings", padx=8, pady=8)
+        spectral = tk.LabelFrame(parent, text="Control Bar", padx=8, pady=8)
         spectral.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        for col in range(12):
+        for col in range(6):
             spectral.grid_columnconfigure(col, weight=1)
         self.param_vars["scan_mode"] = tk.StringVar(value="Medium")
         self.param_vars["trigger_mode"] = tk.StringVar(value="Internal")
@@ -1642,28 +1646,29 @@ class HeraTriggerApp(tk.Tk):
         self.param_vars["binning"] = tk.StringVar(value="None")
         self.param_vars["data_type"] = tk.StringVar(value="SinglePrecision")
         controls = [
-            ("Resolution", "scan_mode", "menu", self.SCAN_MODES.keys(), 8),
+            ("Spectral Resolution", "scan_mode", "menu", self.SCAN_MODES.keys(), 8),
             ("Bands", "bands", "entry", None, 5),
-            ("Avg", "averages", "menu", ("1", "2", "3"), 3),
+            ("Averages", "averages", "menu", ("1", "2", "3"), 3),
             ("Binning", "binning", "menu", self.BINNING_OPTIONS.keys(), 7),
-            ("Stabilize ms", "stabilization", "entry", None, 6),
+            ("Step Wait [ms]", "stabilization", "entry", None, 6),
             ("Data", "data_type", "menu", self.DATA_TYPES.keys(), 13),
         ]
         for index, (label, key, kind, options, width) in enumerate(controls):
-            col = index * 2
-            tk.Label(spectral, text=label).grid(row=0, column=col, sticky="w", padx=(0, 3), pady=2)
+            control_row = (index // 3) * 2
+            col = (index % 3) * 2
+            tk.Label(spectral, text=label).grid(row=control_row, column=col, columnspan=2, sticky="w", padx=(0, 4), pady=(2, 0))
             if kind == "menu":
                 menu = tk.OptionMenu(spectral, self.param_vars[key], *list(options))
                 menu.config(width=width)
-                menu.grid(row=0, column=col + 1, sticky="w", padx=(0, 8), pady=2)
+                menu.grid(row=control_row + 1, column=col, columnspan=2, sticky="ew", padx=(0, 14), pady=(0, 4))
             else:
-                tk.Entry(spectral, textvariable=self.param_vars[key], width=width).grid(row=0, column=col + 1, sticky="w", padx=(0, 8), pady=2)
-        tk.Button(spectral, text="Apply Bands", command=self.apply_parameters_async).grid(row=1, column=3, sticky="w", padx=(0, 8), pady=(2, 0))
+                tk.Entry(spectral, textvariable=self.param_vars[key], width=width).grid(row=control_row + 1, column=col, columnspan=2, sticky="ew", padx=(0, 14), pady=(0, 4))
+        tk.Button(spectral, text="Apply", command=self.apply_parameters_async).grid(row=3, column=4, columnspan=2, sticky="ew", padx=(0, 14), pady=(0, 4))
 
         self._build_views_and_log(parent)
 
     def _build_views_and_log(self, parent):
-        views_frame = tk.LabelFrame(parent, text="Live And Hyperspectral Views", padx=8, pady=8)
+        views_frame = tk.LabelFrame(parent, text="Live View / Hyperspectral View", padx=8, pady=8)
         views_frame.grid(row=1, column=0, sticky="nsew")
         views_frame.grid_rowconfigure(0, weight=1)
         views_frame.grid_columnconfigure(0, weight=1)
@@ -1679,7 +1684,7 @@ class HeraTriggerApp(tk.Tk):
         live_controls.pack(fill="x", padx=8, pady=(8, 4))
         live_display_bar = tk.Frame(live_controls, bg=self.theme["panel"])
         live_display_bar.pack(fill="x")
-        tk.Checkbutton(live_display_bar, text="Auto Contrast", variable=self.live_autocontrast_var,
+        tk.Checkbutton(live_display_bar, text="Autocontrast", variable=self.live_autocontrast_var,
                        command=lambda: self._schedule_live_render(force=True),
                        bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
                        activebackground=self.theme["panel"]).pack(side="left", padx=(12, 0))
@@ -1701,7 +1706,7 @@ class HeraTriggerApp(tk.Tk):
         tk.Button(live_display_bar, text="Snapshot", command=self.snapshot_live_view).pack(side="left", padx=(8, 0))
         tk.Label(live_display_bar, textvariable=self.live_zoom_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(12, 4))
         tk.Button(live_display_bar, text="-", width=3, command=lambda: self.zoom_live_view(1 / 1.25)).pack(side="left")
-        tk.Button(live_display_bar, text="Fit", command=self.fit_live_view).pack(side="left", padx=(6, 0))
+        tk.Button(live_display_bar, text="Fit to view", command=self.fit_live_view).pack(side="left", padx=(6, 0))
         tk.Button(live_display_bar, text="+", width=3, command=lambda: self.zoom_live_view(1.25)).pack(side="left", padx=(6, 0))
         live_profile_grid = tk.Frame(live_tab, bg=self.theme["panel"])
         live_profile_grid.pack(fill="both", expand=True)
@@ -1744,12 +1749,16 @@ class HeraTriggerApp(tk.Tk):
         )
         self.hyper_band_scale.pack(fill="x", padx=8, pady=(0, 6))
         self.hyper_view_canvas = tk.Canvas(hyper_tab, bg=self.theme["canvas"], highlightthickness=0)
-        self.hyper_view_canvas.pack(fill="both", expand=True)
+        self.hyper_view_canvas.pack(fill="both", expand=True, pady=(0, 6))
+        self.hyper_spectrum_canvas = tk.Canvas(hyper_tab, bg=self.theme["canvas"], highlightthickness=0, height=150)
+        self.hyper_spectrum_canvas.pack(fill="x", padx=8, pady=(0, 8))
         self.live_view_canvas.bind("<Configure>", lambda _e: self._draw_live_view_placeholder())
         self.live_vertical_profile_canvas.bind("<Configure>", lambda _e: self._render_live_profiles())
         self.live_horizontal_profile_canvas.bind("<Configure>", lambda _e: self._render_live_profiles())
         self.hyper_view_canvas.bind("<Configure>", lambda _e: self.render_current_hyper_band())
-        for widget in (hyper_tab, self.hyper_band_scale, self.hyper_view_canvas):
+        self.hyper_view_canvas.bind("<Button-1>", self.on_hyper_mouse_click)
+        self.hyper_spectrum_canvas.bind("<Configure>", lambda _e: self._draw_hyper_spectrum_panel())
+        for widget in (hyper_tab, self.hyper_band_scale, self.hyper_view_canvas, self.hyper_spectrum_canvas):
             widget.bind("<Left>", lambda _e: self.step_hyper_band(-1))
             widget.bind("<Right>", lambda _e: self.step_hyper_band(1))
             widget.bind("<MouseWheel>", self.on_hyper_mousewheel)
@@ -1773,7 +1782,7 @@ class HeraTriggerApp(tk.Tk):
         acquisition = tk.LabelFrame(parent, text="Acquisition / Timelapse", padx=8, pady=8)
         acquisition.pack(fill="x", pady=(0, 10))
         tk.Button(acquisition, text="Run Selected Site", command=self.manual_trigger_selected_position).pack(fill="x", pady=3)
-        tk.Button(acquisition, text="Start Hera Acquisition", command=self.start_acquisition).pack(fill="x", pady=3)
+        tk.Button(acquisition, text="Start Acquisition", command=self.start_acquisition).pack(fill="x", pady=3)
         tk.Button(acquisition, text="Abort Hera Acquisition", command=self.abort_acquisition).pack(fill="x", pady=3)
         ttk.Separator(acquisition, orient="horizontal", style="Dark.TSeparator").pack(fill="x", pady=8)
 
@@ -1806,18 +1815,19 @@ class HeraTriggerApp(tk.Tk):
         flatfield = tk.LabelFrame(parent, text="Flatfield", padx=8, pady=8)
         flatfield.pack(fill="x", pady=(0, 10))
         tk.Label(flatfield, textvariable=self.flatfield_status_var, anchor="w", justify="left", wraplength=240).pack(fill="x", pady=(0, 6))
-        tk.Button(flatfield, text="Acquire Flatfield", command=self.start_flatfield_acquisition).pack(fill="x", pady=2)
+        tk.Button(flatfield, text="Acquire Baseline", command=self.start_flatfield_acquisition).pack(fill="x", pady=2)
+        tk.Checkbutton(flatfield, text="Use flatfield correction", variable=self.use_flatfield_var).pack(anchor="w", pady=(4, 2))
         tk.Button(flatfield, text="Clear Flatfield", command=self.clear_flatfield).pack(fill="x", pady=2)
 
-        saving = tk.LabelFrame(parent, text="Saving", padx=8, pady=8)
+        saving = tk.LabelFrame(parent, text="Export", padx=8, pady=8)
         saving.pack(fill="x", pady=(0, 10))
         self.param_vars["output_path"] = tk.StringVar(value=os.path.join(os.path.abspath(os.path.dirname(__file__)), "output"))
-        tk.Label(saving, text="Output path").pack(anchor="w")
+        tk.Label(saving, text="Saving Folder").pack(anchor="w")
         tk.Entry(saving, textvariable=self.param_vars["output_path"], width=30).pack(fill="x", pady=(2, 6))
         tk.Button(saving, text="Browse", command=self.browse_output_path).pack(fill="x", pady=(0, 6))
-        tk.Label(saving, text="Notes saved in ENVI description").pack(anchor="w", pady=(4, 0))
+        tk.Label(saving, text="Notes").pack(anchor="w", pady=(4, 0))
         tk.Entry(saving, textvariable=self.saving_notes_var, width=30).pack(fill="x", pady=(2, 0))
-        self.save_pending_button = tk.Button(saving, text="Save", command=self.save_pending_acquisition, state="disabled")
+        self.save_pending_button = tk.Button(saving, text="Export", command=self.save_pending_acquisition, state="disabled")
         self.save_pending_button.pack(fill="x", pady=(6, 0))
         ttk.Separator(saving, orient="horizontal").pack(fill="x", pady=8)
         tk.Label(saving, text="HyperLAB").pack(anchor="w")
@@ -1825,7 +1835,7 @@ class HeraTriggerApp(tk.Tk):
         hyperlab_buttons = tk.Frame(saving)
         hyperlab_buttons.pack(fill="x")
         tk.Button(hyperlab_buttons, text="Browse", command=self.browse_hyperlab_shortcut).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        tk.Button(hyperlab_buttons, text="Open Current", command=self.open_current_in_hyperlab).pack(side="left", fill="x", expand=True, padx=(4, 0))
+        tk.Button(hyperlab_buttons, text="Open in HyperLAB", command=self.open_current_in_hyperlab).pack(side="left", fill="x", expand=True, padx=(4, 0))
 
     def _build_hera_ui(self, parent):
         frame = tk.LabelFrame(parent, text="Hera Acquisition", padx=8, pady=8)
@@ -1846,12 +1856,12 @@ class HeraTriggerApp(tk.Tk):
         params.grid(row=2, column=0, columnspan=3, sticky="ew")
 
         param_labels = [
-            ("Gain level (0-1):", "gain", 0.0),
-            ("Exposure (ms):", "exposure", 1.0),
-            ("Scan mode:", "scan_mode", "Medium"),
+            ("Gain [dB]:", "gain", 0.0),
+            ("Exposure [ms]:", "exposure", 1.0),
+            ("Spectral Resolution:", "scan_mode", "Medium"),
             ("Trigger mode:", "trigger_mode", "Internal"),
             ("Averages:", "averages", 1),
-            ("Stabilization ms:", "stabilization", 0),
+            ("Step Wait [ms]:", "stabilization", 0),
             ("Bands (0=default):", "bands", 0),
             ("Binning:", "binning", "None"),
             ("Output path:", "output_path", os.path.join(os.path.abspath(os.path.dirname(__file__)), "output")),
@@ -1891,8 +1901,8 @@ class HeraTriggerApp(tk.Tk):
 
         actions = tk.Frame(params)
         actions.grid(row=row, column=0, columnspan=3, pady=8, sticky="w")
-        tk.Button(actions, text="Apply Exposure/HDR", command=self.apply_parameters_async).pack(side="left", padx=(0, 6))
-        tk.Button(actions, text="Start Hera Acquisition", command=self.start_acquisition).pack(side="left", padx=6)
+        tk.Button(actions, text="Apply", command=self.apply_parameters_async).pack(side="left", padx=(0, 6))
+        tk.Button(actions, text="Start Acquisition", command=self.start_acquisition).pack(side="left", padx=6)
         tk.Button(actions, text="Abort Hera Acquisition", command=self.abort_acquisition).pack(side="left", padx=6)
 
     def _build_tango_ui(self, parent):
@@ -2068,7 +2078,7 @@ class HeraTriggerApp(tk.Tk):
 
         live_display_bar = tk.Frame(live_controls, bg=self.theme["panel"])
         live_display_bar.pack(fill="x", pady=(4, 0))
-        tk.Checkbutton(live_display_bar, text="Auto Contrast", variable=self.live_autocontrast_var,
+        tk.Checkbutton(live_display_bar, text="Autocontrast", variable=self.live_autocontrast_var,
                        command=lambda: self._schedule_live_render(force=True),
                        bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
                        activebackground=self.theme["panel"]).pack(side="left", padx=(12, 0))
@@ -2093,7 +2103,7 @@ class HeraTriggerApp(tk.Tk):
         live_zoom_bar.pack(fill="x", pady=(4, 0))
         tk.Label(live_zoom_bar, textvariable=self.live_zoom_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(12, 4))
         tk.Button(live_zoom_bar, text="-", width=3, command=lambda: self.zoom_live_view(1 / 1.25)).pack(side="left")
-        tk.Button(live_zoom_bar, text="Fit", command=self.fit_live_view).pack(side="left", padx=(6, 0))
+        tk.Button(live_zoom_bar, text="Fit to view", command=self.fit_live_view).pack(side="left", padx=(6, 0))
         tk.Button(live_zoom_bar, text="+", width=3, command=lambda: self.zoom_live_view(1.25)).pack(side="left", padx=(6, 0))
         tk.Label(live_zoom_bar, text="Mouse wheel zoom; right-drag pan", fg="#728091", bg=self.theme["panel"]).pack(side="left", padx=(10, 0))
 
@@ -2417,6 +2427,9 @@ class HeraTriggerApp(tk.Tk):
             return False
         keys = ("source_width", "source_height", "width", "height", "bands", "data_type", "display_roi")
         return all(info.get(key) == self.flatfield_info.get(key) for key in keys)
+
+    def _should_use_flatfield_correction(self, info=None):
+        return bool(self.use_flatfield_var.get()) and self._flatfield_matches_current_cube(info)
 
     def _export_normalized_envi_from_cubes(self, sample_handle, flatfield_handle, output_base_path, description, info):
         width = info["width"]
@@ -3474,7 +3487,7 @@ class HeraTriggerApp(tk.Tk):
                 self.last_export_path = hdr_path
                 self._set_var_async(self.last_export_var, f"Last export: {os.path.basename(hdr_path)}")
                 self._log_async(f"Saved hypercube: {hdr_path}")
-                if self._flatfield_matches_current_cube(self.current_hypercube_info):
+                if self._should_use_flatfield_correction(self.current_hypercube_info):
                     normalized_path = f"{output_path}_nrm"
                     normalized_description = f"{description}\nNormalized measurement: native sample divided by flatfield reference"
                     nrm_hdr_path = self._export_normalized_envi_from_cubes(
@@ -3484,9 +3497,9 @@ class HeraTriggerApp(tk.Tk):
                         normalized_description,
                         self.current_hypercube_info,
                     )
-                    self.last_export_path = nrm_hdr_path
-                    self._set_var_async(self.last_export_var, f"Last export: {os.path.basename(nrm_hdr_path)}")
                     self._log_async(f"Exported flatfield-normalized hypercube: {nrm_hdr_path}")
+                elif self.flatfield_hypercube_handle and not self.use_flatfield_var.get():
+                    self._log_async("Flatfield correction is off; saved native hypercube only.")
                 elif self.flatfield_hypercube_handle:
                     self._log_async("Flatfield present but does not match this cube; normalized export skipped.")
                 self._safe_after(0, lambda: self.update_state("Completed"))
@@ -3515,6 +3528,7 @@ class HeraTriggerApp(tk.Tk):
         self.flatfield_info = None
         self.flatfield_status_var.set("Flatfield: none")
         self.current_hyper_band_cache = {}
+        self.current_hyper_spectrum_cache = {}
         self.log("Flatfield cleared.")
         self.render_current_hyper_band()
 
@@ -4053,8 +4067,17 @@ class HeraTriggerApp(tk.Tk):
             if self.app_state == self.STATE_LABELS["WaitingForTrigger"] and progress > 0:
                 self.update_state("Acquiring")
             pct = int(progress * 100)
-            if pct % 10 == 0 or pct >= 99:
-                self.log(f"Acquiring: {pct}%")
+            if pct >= 99:
+                progress_notice = "Acquiring: finishing"
+            elif pct >= 50:
+                progress_notice = "Acquiring: halfway"
+            elif pct > 0:
+                progress_notice = "Acquiring..."
+            else:
+                return
+            if getattr(self, "last_acquisition_progress_notice", None) != progress_notice:
+                self.last_acquisition_progress_notice = progress_notice
+                self.log(progress_notice)
 
         self._safe_after(0, update)
 
@@ -4166,6 +4189,8 @@ class HeraTriggerApp(tk.Tk):
                 "role": self.pending_acquisition_role,
             }
             self.current_hyper_band_cache = {}
+            self.current_hyper_spectrum_cache = {}
+            self.hyper_selected_pixel = None
             if self.pending_acquisition_role == "flatfield":
                 if self.flatfield_hypercube_handle and self.flatfield_hypercube_handle != hypercube_handle:
                     try:
@@ -4206,7 +4231,7 @@ class HeraTriggerApp(tk.Tk):
                 self.last_acquisition_error = ""
                 if self.save_pending_button:
                     self._safe_after(0, lambda: self.save_pending_button.config(state="normal"))
-                self._log_async("Acquisition complete. Press Save to export the hypercube.")
+                self._log_async("Acquisition complete. Press Export to save the native hypercube.")
                 self._safe_after(0, lambda: self.update_state("Completed"))
                 return
 
@@ -4258,8 +4283,8 @@ class HeraTriggerApp(tk.Tk):
             self._log_async(f"Exported hypercube and confirmed files: {hdr_path}")
             if self.pending_acquisition_role == "flatfield":
                 self._set_var_async(self.flatfield_status_var, f"Flatfield: ready ({display_width} x {display_height}, bands={cube_bands})")
-                self._log_async("Flatfield reference is ready. Future sample acquisitions will export a normalized cube when dimensions match.")
-            elif self._flatfield_matches_current_cube(self.current_hypercube_info):
+                self._log_async("Flatfield baseline is ready. Enable Use flatfield correction to add normalized exports for compatible sample cubes.")
+            elif self._should_use_flatfield_correction(self.current_hypercube_info):
                 normalized_path = f"{output_path}_nrm"
                 normalized_description = f"{description}\nNormalized measurement: native sample divided by flatfield reference"
                 nrm_hdr_path = self._export_normalized_envi_from_cubes(
@@ -4269,9 +4294,9 @@ class HeraTriggerApp(tk.Tk):
                     normalized_description,
                     self.current_hypercube_info,
                 )
-                self.last_export_path = nrm_hdr_path
-                self._set_var_async(self.last_export_var, f"Last export: {os.path.basename(nrm_hdr_path)}")
                 self._log_async(f"Exported flatfield-normalized hypercube: {nrm_hdr_path}")
+            elif self.flatfield_hypercube_handle and not self.use_flatfield_var.get():
+                self._log_async("Flatfield correction is off; exported native hypercube only.")
             elif self.flatfield_hypercube_handle:
                 self._log_async("Flatfield is present but does not match this cube dimensions/ROI/bands; normalized export skipped.")
             self.acquisition_success = True
@@ -4285,6 +4310,8 @@ class HeraTriggerApp(tk.Tk):
                 self.current_hypercube_handle = None
                 self.current_hypercube_info = None
                 self.current_hyper_band_cache = {}
+                self.current_hyper_spectrum_cache = {}
+                self.hyper_selected_pixel = None
                 self._safe_after(
                     0,
                     lambda: (
@@ -4571,7 +4598,7 @@ class HeraTriggerApp(tk.Tk):
 
     def on_live_gamma_change(self, _value=None):
         gamma = self._get_live_display_gamma()
-        self.live_gamma_label_var.set(f"Gamma {gamma:.1f}")
+        self.live_gamma_label_var.set(f"Gamma Value {gamma:.1f}")
         self._schedule_live_render(force=True)
 
     def reset_live_gamma(self):
@@ -4723,6 +4750,9 @@ class HeraTriggerApp(tk.Tk):
         self.current_hypercube_handle = None
         self.current_hypercube_info = None
         self.current_hyper_band_cache = {}
+        self.current_hyper_spectrum_cache = {}
+        self.hyper_selected_pixel = None
+        self.hyper_display_rect = None
         self.current_hyper_band_index.set(0)
         self.current_hyper_band_var.set("Band: -")
         self.current_hyper_wavelength_var.set("Wavelength: -")
@@ -4777,6 +4807,128 @@ class HeraTriggerApp(tk.Tk):
             cropped.extend(band_values[start:start + roi_w])
         return cropped
 
+    def _get_hyper_band_values_for_display(self, band_index):
+        source_width = self.current_hypercube_info.get("source_width", self.current_hypercube_info["width"])
+        source_height = self.current_hypercube_info.get("source_height", self.current_hypercube_info["height"])
+        display_roi = self.current_hypercube_info.get("display_roi")
+        wavelength, band_values = self.controller.get_hypercube_band_data(
+            self.current_hypercube_handle,
+            band_index,
+            source_width,
+            source_height,
+            self.current_hypercube_info["data_type"],
+        )
+        band_values = self._crop_hyper_band_values_for_display(band_values, source_width, display_roi)
+        if (
+            self.current_hypercube_info.get("role") != "flatfield"
+            and self._should_use_flatfield_correction(self.current_hypercube_info)
+        ):
+            _, flat_values = self.controller.get_hypercube_band_data(
+                self.flatfield_hypercube_handle,
+                band_index,
+                source_width,
+                source_height,
+                self.current_hypercube_info["data_type"],
+            )
+            flat_values = self._crop_hyper_band_values_for_display(flat_values, source_width, display_roi)
+            band_values = [
+                float(sample) / float(flat) if abs(float(flat)) > 1e-12 else 0.0
+                for sample, flat in zip(band_values, flat_values)
+            ]
+        return wavelength, band_values
+
+    def _event_to_hyper_image_xy(self, event):
+        rect = self.hyper_display_rect
+        if not rect or not self.current_hypercube_info:
+            return None
+        left, top, out_w, out_h = rect
+        if event.x < left or event.x >= left + out_w or event.y < top or event.y >= top + out_h:
+            return None
+        frame_width = self.current_hypercube_info["width"]
+        frame_height = self.current_hypercube_info["height"]
+        image_x = min(max(int((event.x - left) * frame_width / out_w), 0), frame_width - 1)
+        image_y = min(max(int((event.y - top) * frame_height / out_h), 0), frame_height - 1)
+        return image_x, image_y
+
+    def on_hyper_mouse_click(self, event):
+        image_pos = self._event_to_hyper_image_xy(event)
+        if not image_pos:
+            return
+        self.hyper_selected_pixel = image_pos
+        self._draw_hyper_spectrum_panel()
+        self.render_current_hyper_band()
+
+    def _get_hyper_pixel_spectrum(self, image_x, image_y):
+        cache_key = (image_x, image_y)
+        if cache_key in self.current_hyper_spectrum_cache:
+            return self.current_hyper_spectrum_cache[cache_key]
+        bands = self.current_hypercube_info["bands"]
+        width = self.current_hypercube_info["width"]
+        index = image_y * width + image_x
+        spectrum = []
+        for band_index in range(bands):
+            if band_index in self.current_hyper_band_cache and len(self.current_hyper_band_cache[band_index]) >= 3:
+                wavelength, _, band_values = self.current_hyper_band_cache[band_index]
+            else:
+                wavelength, band_values = self._get_hyper_band_values_for_display(band_index)
+            value = band_values[index] if 0 <= index < len(band_values) else 0.0
+            spectrum.append((wavelength, float(value)))
+        self.current_hyper_spectrum_cache[cache_key] = spectrum
+        return spectrum
+
+    def _draw_hyper_spectrum_panel(self):
+        if not hasattr(self, "hyper_spectrum_canvas"):
+            return
+        canvas = self.hyper_spectrum_canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 10)
+        height = max(canvas.winfo_height(), 10)
+        pad_left, pad_right, pad_top, pad_bottom = 48, 14, 18, 28
+        canvas.create_rectangle(0, 0, width, height, fill=self.theme["canvas"], outline="")
+        plot_w = max(width - pad_left - pad_right, 1)
+        plot_h = max(height - pad_top - pad_bottom, 1)
+        x0, y0 = pad_left, pad_top
+        x1, y1 = pad_left + plot_w, pad_top + plot_h
+        for i in range(5):
+            y = y0 + i * plot_h / 4
+            canvas.create_line(x0, y, x1, y, fill=self.theme["canvas_grid"])
+        canvas.create_line(x0, y0, x0, y1, fill=self.theme["muted"])
+        canvas.create_line(x0, y1, x1, y1, fill=self.theme["muted"])
+        canvas.create_text(8, 8, anchor="nw", text="Spectrum panel", fill=self.theme["muted"], font=("Segoe UI", 8))
+        if not self.current_hypercube_info or not self.hyper_selected_pixel:
+            canvas.create_text(width / 2, height / 2, text="Click the hyperspectral image to plot a pixel spectrum", fill=self.theme["muted"], font=("Segoe UI", 9))
+            return
+        try:
+            image_x, image_y = self.hyper_selected_pixel
+            spectrum = self._get_hyper_pixel_spectrum(image_x, image_y)
+        except Exception as exc:
+            canvas.create_text(width / 2, height / 2, text=f"Spectrum unavailable: {exc}", fill=self.theme["muted"], font=("Segoe UI", 9))
+            return
+        if len(spectrum) < 2:
+            canvas.create_text(width / 2, height / 2, text="Need at least two bands for spectrum", fill=self.theme["muted"], font=("Segoe UI", 9))
+            return
+        wavelengths = [point[0] for point in spectrum]
+        values = [point[1] for point in spectrum]
+        min_w, max_w = min(wavelengths), max(wavelengths)
+        min_v, max_v = min(values), max(values)
+        if math.isclose(min_v, max_v):
+            min_v -= 1.0
+            max_v += 1.0
+        current_band = min(max(int(self.current_hyper_band_index.get()), 0), len(spectrum) - 1)
+        current_w = wavelengths[current_band]
+        current_x = x0 + ((current_w - min_w) / max(max_w - min_w, 1e-12)) * plot_w
+        canvas.create_line(current_x, y0, current_x, y1, fill="#ff8b3d", width=1)
+        prev = None
+        for wavelength, value in spectrum:
+            x = x0 + ((wavelength - min_w) / max(max_w - min_w, 1e-12)) * plot_w
+            y = y1 - ((value - min_v) / max(max_v - min_v, 1e-12)) * plot_h
+            if prev:
+                canvas.create_line(prev[0], prev[1], x, y, fill=self.theme["accent_soft"], width=2)
+            prev = (x, y)
+        canvas.create_text(x0, height - 8, anchor="sw", text=f"{min_w:.0f}", fill=self.theme["muted"], font=("Segoe UI", 8))
+        canvas.create_text(x1, height - 8, anchor="se", text=f"{max_w:.0f}", fill=self.theme["muted"], font=("Segoe UI", 8))
+        canvas.create_text(width - 10, 8, anchor="ne", text=f"Pixel selection X={image_x} Y={image_y}", fill=self.theme["text"], font=("Segoe UI", 9))
+
     def render_current_hyper_band(self):
         if not hasattr(self, "hyper_view_canvas"):
             return
@@ -4787,33 +4939,7 @@ class HeraTriggerApp(tk.Tk):
             band_index = min(max(int(self.current_hyper_band_index.get()), 0), self.current_hypercube_info["bands"] - 1)
             self.current_hyper_band_index.set(band_index)
             if band_index not in self.current_hyper_band_cache:
-                source_width = self.current_hypercube_info.get("source_width", self.current_hypercube_info["width"])
-                source_height = self.current_hypercube_info.get("source_height", self.current_hypercube_info["height"])
-                display_roi = self.current_hypercube_info.get("display_roi")
-                wavelength, band_values = self.controller.get_hypercube_band_data(
-                    self.current_hypercube_handle,
-                    band_index,
-                    source_width,
-                    source_height,
-                    self.current_hypercube_info["data_type"],
-                )
-                band_values = self._crop_hyper_band_values_for_display(band_values, source_width, display_roi)
-                if (
-                    self.current_hypercube_info.get("role") != "flatfield"
-                    and self._flatfield_matches_current_cube(self.current_hypercube_info)
-                ):
-                    _, flat_values = self.controller.get_hypercube_band_data(
-                        self.flatfield_hypercube_handle,
-                        band_index,
-                        source_width,
-                        source_height,
-                        self.current_hypercube_info["data_type"],
-                    )
-                    flat_values = self._crop_hyper_band_values_for_display(flat_values, source_width, display_roi)
-                    band_values = [
-                        float(sample) / float(flat) if abs(float(flat)) > 1e-12 else 0.0
-                        for sample, flat in zip(band_values, flat_values)
-                    ]
+                wavelength, band_values = self._get_hyper_band_values_for_display(band_index)
                 min_value = min(band_values)
                 max_value = max(band_values)
                 if math.isclose(min_value, max_value):
@@ -4824,12 +4950,12 @@ class HeraTriggerApp(tk.Tk):
                         max(0, min(255, int((value - min_value) * scale)))
                         for value in band_values
                     )
-                self.current_hyper_band_cache[band_index] = (wavelength, gray_bytes)
+                self.current_hyper_band_cache[band_index] = (wavelength, gray_bytes, band_values)
                 self.log(
                     f"Hyperspectral band {band_index + 1}/{self.current_hypercube_info['bands']} "
                     f"render range: min={min_value:.6f}, max={max_value:.6f}, wavelength={wavelength:.3f}"
                 )
-            wavelength, gray_bytes = self.current_hyper_band_cache[band_index]
+            wavelength, gray_bytes = self.current_hyper_band_cache[band_index][:2]
             canvas = self.hyper_view_canvas
             canvas.delete("all")
             width = max(canvas.winfo_width(), 10)
@@ -4841,8 +4967,18 @@ class HeraTriggerApp(tk.Tk):
                 max(width - 16, 1),
                 max(height - 16, 1),
             )
+            left = (width - out_w) / 2
+            top = (height - out_h) / 2
+            self.hyper_display_rect = (left, top, out_w, out_h)
             canvas.create_rectangle(0, 0, width, height, fill=self.theme["canvas"], outline="")
             canvas.create_image(width / 2, height / 2, image=self.hyper_photo, anchor="center")
+            if self.hyper_selected_pixel:
+                sx, sy = self.hyper_selected_pixel
+                marker_x = left + (sx + 0.5) * out_w / self.current_hypercube_info["width"]
+                marker_y = top + (sy + 0.5) * out_h / self.current_hypercube_info["height"]
+                canvas.create_line(marker_x - 9, marker_y, marker_x + 9, marker_y, fill="#ffd15c", width=2)
+                canvas.create_line(marker_x, marker_y - 9, marker_x, marker_y + 9, fill="#ffd15c", width=2)
+                canvas.create_oval(marker_x - 4, marker_y - 4, marker_x + 4, marker_y + 4, outline="#ffd15c", width=2)
             canvas.create_text(
                 12,
                 12,
@@ -4854,6 +4990,7 @@ class HeraTriggerApp(tk.Tk):
             self.current_hyper_band_var.set(f"Band: {band_index + 1} / {self.current_hypercube_info['bands']}")
             self.hyper_band_jump_var.set(str(band_index + 1))
             self.current_hyper_wavelength_var.set(f"Wavelength: {wavelength:.3f}")
+            self._draw_hyper_spectrum_panel()
         except Exception as exc:
             self.log(f"Failed to render hyperspectral band: {exc}")
             self._draw_hyperspectral_view_placeholder()
@@ -5366,6 +5503,7 @@ class HeraTriggerApp(tk.Tk):
     def _draw_hyperspectral_view_placeholder(self):
         if not hasattr(self, "hyper_view_canvas"):
             return
+        self.hyper_display_rect = None
         canvas = self.hyper_view_canvas
         canvas.delete("all")
         width = max(canvas.winfo_width(), 10)
@@ -5383,6 +5521,7 @@ class HeraTriggerApp(tk.Tk):
         export_text = self.last_export_var.get() if hasattr(self, "last_export_var") else "Last export: -"
         canvas.create_text(width / 2, height / 2 + 24, text=self.hypercube_summary_var.get(), fill=self.theme["text"], font=("Segoe UI", 10))
         canvas.create_text(width / 2, height / 2 + 46, text=export_text, fill=self.theme["muted"], font=("Segoe UI", 10))
+        self._draw_hyper_spectrum_panel()
 
     def update_state(self, state_key):
         label = self.STATE_LABELS.get(state_key, state_key)
