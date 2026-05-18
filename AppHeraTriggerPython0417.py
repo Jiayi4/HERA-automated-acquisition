@@ -4855,26 +4855,22 @@ class HeraTriggerApp(tk.Tk):
         if not image_pos:
             return
         self.hyper_selected_pixel = image_pos
+        self.current_hyper_spectrum_cache = {}
         self._draw_hyper_spectrum_panel()
         self.render_current_hyper_band()
 
     def _get_hyper_pixel_spectrum(self, image_x, image_y):
-        cache_key = (image_x, image_y)
-        if cache_key in self.current_hyper_spectrum_cache:
-            return self.current_hyper_spectrum_cache[cache_key]
-        bands = self.current_hypercube_info["bands"]
+        cache_key = (image_x, image_y, bool(self.use_flatfield_var.get()))
         width = self.current_hypercube_info["width"]
         index = image_y * width + image_x
-        spectrum = []
-        for band_index in range(bands):
-            if band_index in self.current_hyper_band_cache and len(self.current_hyper_band_cache[band_index]) >= 3:
-                wavelength, _, band_values = self.current_hyper_band_cache[band_index]
-            else:
-                wavelength, band_values = self._get_hyper_band_values_for_display(band_index)
-            value = band_values[index] if 0 <= index < len(band_values) else 0.0
-            spectrum.append((wavelength, float(value)))
-        self.current_hyper_spectrum_cache[cache_key] = spectrum
-        return spectrum
+        spectrum_by_band = self.current_hyper_spectrum_cache.setdefault(cache_key, {})
+        for band_index, cached_band in self.current_hyper_band_cache.items():
+            if len(cached_band) < 3:
+                continue
+            wavelength, _, band_values = cached_band
+            if 0 <= index < len(band_values):
+                spectrum_by_band[band_index] = (wavelength, float(band_values[index]))
+        return [spectrum_by_band[key] for key in sorted(spectrum_by_band)]
 
     def _draw_hyper_spectrum_panel(self):
         if not hasattr(self, "hyper_spectrum_canvas"):
@@ -4905,7 +4901,7 @@ class HeraTriggerApp(tk.Tk):
             canvas.create_text(width / 2, height / 2, text=f"Spectrum unavailable: {exc}", fill=self.theme["muted"], font=("Segoe UI", 9))
             return
         if len(spectrum) < 2:
-            canvas.create_text(width / 2, height / 2, text="Need at least two bands for spectrum", fill=self.theme["muted"], font=("Segoe UI", 9))
+            canvas.create_text(width / 2, height / 2, text="Move through bands to build the spectrum", fill=self.theme["muted"], font=("Segoe UI", 9))
             return
         wavelengths = [point[0] for point in spectrum]
         values = [point[1] for point in spectrum]
@@ -4972,6 +4968,17 @@ class HeraTriggerApp(tk.Tk):
             self.hyper_display_rect = (left, top, out_w, out_h)
             canvas.create_rectangle(0, 0, width, height, fill=self.theme["canvas"], outline="")
             canvas.create_image(width / 2, height / 2, image=self.hyper_photo, anchor="center")
+            if self.hyper_selected_pixel:
+                sx, sy = self.hyper_selected_pixel
+                if sx >= self.current_hypercube_info["width"] or sy >= self.current_hypercube_info["height"]:
+                    self.hyper_selected_pixel = None
+                else:
+                    cache_key = (sx, sy, bool(self.use_flatfield_var.get()))
+                    index = sy * self.current_hypercube_info["width"] + sx
+                    if len(self.current_hyper_band_cache[band_index]) >= 3:
+                        _, _, band_values = self.current_hyper_band_cache[band_index]
+                        if 0 <= index < len(band_values):
+                            self.current_hyper_spectrum_cache.setdefault(cache_key, {})[band_index] = (wavelength, float(band_values[index]))
             if self.hyper_selected_pixel:
                 sx, sy = self.hyper_selected_pixel
                 marker_x = left + (sx + 0.5) * out_w / self.current_hypercube_info["width"]
