@@ -6,7 +6,15 @@ import time
 from datetime import datetime, timedelta
 
 
+class TimelapseStopped(Exception):
+    pass
+
+
 class TimelapseMixin:
+    def _begin_timelapse_run(self):
+        self.timelapse_run_id += 1
+        return self.timelapse_run_id
+
     def _roi_plan_message(self, label, positions):
         positions = list(positions)
         saved_count = sum(1 for position in positions if self._get_position_roi(position))
@@ -43,7 +51,8 @@ class TimelapseMixin:
         self.timelapse_status_var.set("Timelapse: running")
         self.update_state("RunningTimelapse")
 
-        self.timelapse_thread = threading.Thread(target=self._timelapse_worker, args=(True,), daemon=True)
+        run_id = self._begin_timelapse_run()
+        self.timelapse_thread = threading.Thread(target=self._timelapse_worker, args=(True, None, run_id), daemon=True)
         self.timelapse_thread.start()
         self.log(self._roi_plan_message("Running one cycle", self.positions))
         self.log(f"Auto-save products: {self._export_selection_text()}.")
@@ -74,9 +83,10 @@ class TimelapseMixin:
         self.timelapse_status_var.set("Timelapse: running")
         self.update_state("RunningTimelapse")
 
+        run_id = self._begin_timelapse_run()
         self.timelapse_thread = threading.Thread(
             target=self._timelapse_worker,
-            args=(True, test_sites),
+            args=(True, test_sites, run_id),
             daemon=True,
         )
         self.timelapse_thread.start()
@@ -110,7 +120,8 @@ class TimelapseMixin:
         self.timelapse_status_var.set("Timelapse: running")
         self.update_state("RunningTimelapse")
 
-        self.timelapse_thread = threading.Thread(target=self._timelapse_worker, args=(False,), daemon=True)
+        run_id = self._begin_timelapse_run()
+        self.timelapse_thread = threading.Thread(target=self._timelapse_worker, args=(False, None, run_id), daemon=True)
         self.timelapse_thread.start()
         self.log(self._roi_plan_message("Timelapse started", self.positions))
         self.log(f"Auto-save products: {self._export_selection_text()}.")
@@ -133,14 +144,40 @@ class TimelapseMixin:
             self.log("Timelapse paused.")
 
     def stop_timelapse(self):
+        if not self.timelapse_thread or not self.timelapse_thread.is_alive():
+            self.timelapse_stop_event.set()
+            self.timelapse_pause_event.clear()
+            self.timelapse_roi = None
+            self.pause_button.config(text="Pause")
+            self.timelapse_status_var.set("Timelapse: idle")
+            self.log("Timelapse is not running.")
+            return
+
         self.timelapse_stop_event.set()
         self.timelapse_pause_event.clear()
         self.timelapse_roi = None
         self.pause_button.config(text="Pause")
         self.timelapse_status_var.set("Timelapse: stopping")
+        self._abort_current_timelapse_acquisition()
         self.log("Timelapse stop requested.")
 
-    def _timelapse_worker(self, single_cycle=False, positions_override=None):
+    def _abort_current_timelapse_acquisition(self):
+        if not self.controller or not self.controller.connected:
+            return
+        try:
+            if not self.controller.is_acquiring():
+                return
+            self.controller.abort_hyperspectral_acquisition()
+            self.acquisition_success = False
+            self.last_acquisition_error = "Timelapse stopped by user."
+            self.acquisition_done_event.set()
+            self.log("Current Hera acquisition aborted for timelapse stop.")
+        except Exception as exc:
+            self.log(f"Could not abort current Hera acquisition during timelapse stop: {exc}")
+
+    def _timelapse_worker(self, single_cycle=False, positions_override=None, run_id=None):
+        if run_id is None:
+            run_id = self.timelapse_run_id
         cycle = 0
         interval_min = float(self.interval_var.get())
         positions = list(positions_override) if positions_override is not None else list(self.positions)
@@ -162,6 +199,8 @@ class TimelapseMixin:
                         break
 
                     export_path, confirmed_z, z_status = self.run_stage_site_acquisition(position, cycle_index=cycle)
+                    if self.timelapse_stop_event.is_set():
+                        break
                     x, y, _, _ = self.tango.get_position()
                     self.trigger_log.append(
                         {
@@ -198,14 +237,18 @@ class TimelapseMixin:
                         self.timelapse_stop_event.set()
                         break
                     time.sleep(0.25)
+        except TimelapseStopped as exc:
+            self._log_async(str(exc) or "Timelapse stopped.")
         except Exception as exc:
             self._log_async(f"Timelapse failed: {exc}")
             self._safe_after(0, lambda: self.update_state("Error"))
         finally:
             self._write_trigger_log_if_needed()
-            self._safe_after(0, self._finish_timelapse)
+            self._safe_after(0, lambda run_id=run_id: self._finish_timelapse(run_id))
 
-    def _finish_timelapse(self):
+    def _finish_timelapse(self, run_id=None):
+        if run_id is not None and run_id != self.timelapse_run_id:
+            return
         self.timelapse_stop_event.set()
         self.timelapse_pause_event.clear()
         self.pause_button.config(text="Pause")
@@ -232,6 +275,24 @@ class TimelapseMixin:
     def _wait_while_paused(self):
         while self.timelapse_pause_event.is_set() and not self.timelapse_stop_event.is_set():
             time.sleep(0.1)
+
+    def _await_timelapse_acquisition_completion(self, timeout_sec=300):
+        deadline = time.time() + timeout_sec
+        abort_requested = False
+        while time.time() < deadline:
+            if self.acquisition_done_event.wait(timeout=0.25):
+                break
+            if self.timelapse_stop_event.is_set() and not abort_requested:
+                abort_requested = True
+                self._abort_current_timelapse_acquisition()
+        else:
+            raise RuntimeError("Timed out waiting for Hera acquisition to complete.")
+
+        if self.timelapse_stop_event.is_set() and not self.acquisition_success:
+            raise TimelapseStopped("Timelapse stopped by user.")
+        if not self.acquisition_success:
+            raise RuntimeError(self.last_acquisition_error or "Hera acquisition failed.")
+        return self.last_export_path
 
     def _update_time_remaining(self):
         if self.timelapse_thread and self.timelapse_thread.is_alive() and self.timelapse_stop_at:
@@ -270,6 +331,9 @@ class TimelapseMixin:
                 self.log(f"Settling at {position.name} for {dwell:.1f} seconds.")
                 time.sleep(dwell)
 
+        if self.timelapse_stop_event.is_set():
+            raise TimelapseStopped("Timelapse stopped before acquisition.")
+
         # Move Z after XY is settled. Skip if NIS Z bridge is not active.
         confirmed_z = None
         z_status = "no Z"
@@ -279,6 +343,9 @@ class TimelapseMixin:
             confirmed_z, z_status = self._move_z_to_position(target_z)
         elif z_status != "no Z":
             self._log_async(f"{z_status} for {position.name}; starting Hera acquisition without Z move.")
+
+        if self.timelapse_stop_event.is_set():
+            raise TimelapseStopped("Timelapse stopped before acquisition.")
 
         self.log(f"Starting Hera acquisition at {position.name}.")
         if cycle_index is None:
@@ -291,5 +358,5 @@ class TimelapseMixin:
         else:
             self.log(f"No ROI saved for {position.name}; acquiring full frame.")
         self._arm_and_start_acquisition(export_tag=export_tag, forced_roi=site_roi)
-        export_path = self._await_acquisition_completion()
+        export_path = self._await_timelapse_acquisition_completion()
         return export_path, confirmed_z, z_status

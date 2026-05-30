@@ -100,6 +100,7 @@ class HeraTriggerApp(
         self.timelapse_thread = None
         self.timelapse_stop_event = threading.Event()
         self.timelapse_pause_event = threading.Event()
+        self.timelapse_run_id = 0
         self.timelapse_roi = None
         self.acquisition_done_event = threading.Event()
         self.acquisition_success = False
