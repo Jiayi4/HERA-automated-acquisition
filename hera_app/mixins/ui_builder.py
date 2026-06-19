@@ -251,6 +251,16 @@ class UIBuilderMixin:
         self._auto_apply_parameters_job = None
         if not getattr(self, "controller", None) or not self.controller.connected:
             return
+        busy_states = {
+            self.STATE_LABELS["WaitingForTrigger"],
+            self.STATE_LABELS["Acquiring"],
+            self.STATE_LABELS["ComputingHypercube"],
+            self.STATE_LABELS["Saving"],
+        }
+        start_lock = getattr(self, "acquisition_start_lock", None)
+        if self.app_state in busy_states or (start_lock and start_lock.locked()):
+            self._auto_apply_parameters_job = self._safe_after(1000, self._run_auto_apply_parameters)
+            return
         if self.parameter_apply_lock.locked():
             self._auto_apply_parameters_job = self._safe_after(350, self._run_auto_apply_parameters)
             return
@@ -333,7 +343,9 @@ class UIBuilderMixin:
         exposure.grid_columnconfigure(1, weight=1)
         self._param_entry(exposure, 0, "Gain [dB]:", "gain", 0.0)
         self._param_entry(exposure, 1, "Exposure [ms]:", "exposure", 1.0)
-        tk.Checkbutton(exposure, text="HDR", variable=self.hdr_enabled_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        tk.Checkbutton(exposure, text=self.HDR_CHECKBOX_TEXT, variable=self.hdr_enabled_var).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
 
         roi = tk.LabelFrame(camera_tab, text="ROI", padx=6, pady=5)
         roi.pack(fill="x", pady=(0, 6))
@@ -461,7 +473,7 @@ class UIBuilderMixin:
         self._build_views_and_log(parent)
 
     def _build_views_and_log(self, parent):
-        views_frame = tk.LabelFrame(parent, text="Live View / Hyperspectral View", padx=6, pady=6)
+        views_frame = tk.Frame(parent, bg=self.theme["bg"])
         views_frame.grid(row=1, column=0, sticky="nsew")
         views_frame.grid_rowconfigure(0, weight=1)
         views_frame.grid_columnconfigure(0, weight=1)
@@ -523,13 +535,9 @@ class UIBuilderMixin:
 
         hyper_controls = tk.Frame(hyper_tab, bg=self.theme["panel"])
         hyper_controls.pack(fill="x", padx=6, pady=(6, 3))
-        tk.Button(hyper_controls, text="Prev Band", command=lambda: self.step_hyper_band(-1)).pack(side="left", padx=(0, 5))
-        tk.Label(hyper_controls, textvariable=self.current_hyper_band_var, fg="#e7edf5").pack(side="left")
-        ttk.Separator(hyper_controls, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=8)
-        tk.Label(hyper_controls, textvariable=self.current_hyper_wavelength_var, fg="#9aa6b2").pack(side="left")
         show_wrap = tk.Frame(hyper_controls, bg=self.theme["panel"])
-        show_wrap.pack(side="left", padx=(8, 0))
-        tk.Label(show_wrap, text="Show", fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(0, 3))
+        show_wrap.pack(side="left")
+        tk.Label(show_wrap, text="Display", fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(0, 3))
         show_menu = tk.OptionMenu(
             show_wrap,
             self.hyper_display_mode_var,
@@ -550,12 +558,22 @@ class UIBuilderMixin:
             selectcolor=self.theme["field"],
             activebackground=self.theme["panel"],
         ).pack(side="left", padx=(8, 0))
-        jump_wrap = tk.Frame(hyper_controls, bg=self.theme["panel"])
+        self.hyper_view_canvas = tk.Canvas(hyper_tab, bg=self.theme["canvas"], highlightthickness=0)
+        self.hyper_view_canvas.pack(fill="both", expand=True, pady=(0, 4))
+        self.hyper_spectrum_canvas = tk.Canvas(hyper_tab, bg=self.theme["canvas"], highlightthickness=0, height=165)
+        self.hyper_spectrum_canvas.pack(fill="x", padx=6, pady=(0, 4))
+        band_controls = tk.Frame(hyper_tab, bg=self.theme["panel"])
+        band_controls.pack(fill="x", padx=6, pady=(0, 3))
+        tk.Button(band_controls, text="Prev Band", command=lambda: self.step_hyper_band(-1)).pack(side="left", padx=(0, 5))
+        tk.Label(band_controls, textvariable=self.current_hyper_band_var, fg="#e7edf5", bg=self.theme["panel"]).pack(side="left")
+        ttk.Separator(band_controls, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=8)
+        tk.Label(band_controls, textvariable=self.current_hyper_wavelength_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left")
+        jump_wrap = tk.Frame(band_controls, bg=self.theme["panel"])
         jump_wrap.pack(side="right", padx=(6, 0))
         tk.Button(jump_wrap, text="Go", command=self.jump_to_hyper_band).pack(side="right")
         tk.Entry(jump_wrap, textvariable=self.hyper_band_jump_var, width=5).pack(side="right", padx=(0, 4))
-        tk.Label(jump_wrap, text="Band", fg="#9aa6b2").pack(side="right", padx=(0, 4))
-        tk.Button(hyper_controls, text="Next Band", command=lambda: self.step_hyper_band(1)).pack(side="right")
+        tk.Label(jump_wrap, text="Band", fg="#9aa6b2", bg=self.theme["panel"]).pack(side="right", padx=(0, 4))
+        tk.Button(band_controls, text="Next Band", command=lambda: self.step_hyper_band(1)).pack(side="right")
         self.hyper_band_scale = tk.Scale(
             hyper_tab, from_=0, to=0, orient="horizontal", variable=self.current_hyper_band_index,
             command=self.on_hyper_band_changed, showvalue=False, highlightthickness=0, bd=0,
@@ -563,11 +581,7 @@ class UIBuilderMixin:
             activebackground=self.theme["accent"], sliderlength=24, width=14, repeatdelay=150,
             repeatinterval=80, takefocus=1, cursor="hand2",
         )
-        self.hyper_band_scale.pack(fill="x", padx=6, pady=(0, 4))
-        self.hyper_view_canvas = tk.Canvas(hyper_tab, bg=self.theme["canvas"], highlightthickness=0)
-        self.hyper_view_canvas.pack(fill="both", expand=True, pady=(0, 4))
-        self.hyper_spectrum_canvas = tk.Canvas(hyper_tab, bg=self.theme["canvas"], highlightthickness=0, height=165)
-        self.hyper_spectrum_canvas.pack(fill="x", padx=6, pady=(0, 6))
+        self.hyper_band_scale.pack(fill="x", padx=6, pady=(0, 6))
         self.live_view_canvas.bind("<Configure>", lambda _e: self._draw_live_view_placeholder())
         self.live_vertical_profile_canvas.bind("<Configure>", lambda _e: self._render_live_profiles())
         self.live_horizontal_profile_canvas.bind("<Configure>", lambda _e: self._render_live_profiles())
@@ -634,6 +648,19 @@ class UIBuilderMixin:
             value_label.pack(side="left", fill="x", expand=True)
             if strong:
                 self.right_app_state_label = value_label
+        self.run_progressbar = ttk.Progressbar(
+            run_status,
+            variable=self.run_progress_var,
+            maximum=100,
+            mode="determinate",
+        )
+        self.run_progressbar.pack(fill="x", pady=(5, 1))
+        tk.Label(
+            run_status,
+            textvariable=self.run_progress_text_var,
+            fg=self.theme["muted"],
+            anchor="w",
+        ).pack(fill="x")
         ttk.Separator(acquisition, orient="horizontal", style="Dark.TSeparator").pack(fill="x", pady=6)
 
         self.interval_var = tk.DoubleVar(value=10.0)
@@ -670,15 +697,58 @@ class UIBuilderMixin:
         tk.Label(saving, text="Data to Export").pack(anchor="w", pady=(3, 0))
         data_row = tk.Frame(saving)
         data_row.pack(fill="x", pady=(1, 3))
-        tk.Checkbutton(data_row, text="_raw", variable=self.export_raw_var).pack(side="left")
-        tk.Checkbutton(data_row, text="_ref", variable=self.export_flatfield_var).pack(side="left", padx=(4, 0))
-        tk.Checkbutton(data_row, text="_nrm", variable=self.export_normalized_var).pack(side="left", padx=(4, 0))
+        self.export_raw_checkbutton = tk.Checkbutton(
+            data_row,
+            text="_raw",
+            variable=self.export_raw_var,
+            command=self._refresh_export_controls_for_display_mode,
+        )
+        self.export_raw_checkbutton.pack(side="left")
+        self.export_ref_checkbutton = tk.Checkbutton(
+            data_row,
+            text="_ref",
+            variable=self.export_flatfield_var,
+            command=self._refresh_export_controls_for_display_mode,
+        )
+        self.export_ref_checkbutton.pack(side="left", padx=(4, 0))
+        self.export_nrm_checkbutton = tk.Checkbutton(
+            data_row,
+            text="_nrm",
+            variable=self.export_normalized_var,
+            command=self._refresh_export_controls_for_display_mode,
+        )
+        self.export_nrm_checkbutton.pack(side="left", padx=(4, 0))
         tk.Label(saving, text="Notes").pack(anchor="w", pady=(3, 0))
         tk.Entry(saving, textvariable=self.saving_notes_var, width=26).pack(fill="x", pady=(1, 0))
         self.save_pending_button = tk.Button(saving, text="Export", command=self.save_pending_acquisition, state="disabled")
         self.save_pending_button.pack(fill="x", pady=(4, 0))
+        self._refresh_export_controls_for_display_mode()
         ttk.Separator(saving, orient="horizontal").pack(fill="x", pady=6)
         tk.Button(saving, text="Open in HyperLAB", command=self.open_current_in_hyperlab).pack(fill="x")
+
+    def _refresh_export_controls_for_display_mode(self):
+        for widget in (
+            getattr(self, "export_raw_checkbutton", None),
+            getattr(self, "export_ref_checkbutton", None),
+            getattr(self, "export_nrm_checkbutton", None),
+        ):
+            if widget:
+                widget.config(state="normal")
+        save_button = getattr(self, "save_pending_button", None)
+        if not save_button:
+            return
+        current_is_sample = bool(
+            self.current_hypercube_handle
+            and self.current_hypercube_info
+            and self.current_hypercube_info.get("role") != "flatfield"
+        )
+        flatfield_loaded = bool(self.flatfield_hypercube_handle and self.flatfield_info)
+        export_raw = self._bool_var_value("export_raw_var", True)
+        export_ref = self._bool_var_value("export_flatfield_var", True)
+        export_nrm = self._bool_var_value("export_normalized_var", True)
+        selected_export_possible = bool((current_is_sample and export_raw) or (flatfield_loaded and export_ref) or (current_is_sample and flatfield_loaded and export_nrm))
+        can_export = bool(selected_export_possible)
+        save_button.config(text="Export", state="normal" if can_export else "disabled")
 
     def _build_hera_ui(self, parent):
         frame = tk.LabelFrame(parent, text="Hera Acquisition", padx=8, pady=8)

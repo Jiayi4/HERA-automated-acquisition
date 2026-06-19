@@ -82,7 +82,7 @@ class DeviceMixin:
             self.controller.live_capture_handler_func = self.on_live_capture_frame
             self.controller.connect()
             self.check_license_status()
-            self.refresh_hdr_status()
+            self.initialize_hdr_mode_on_connect()
             self.start_live_view()
             self.update_state("Ready")
             self.log(f"Connected to Hera device {index}: {self._device_title(self.devices[index])}")
@@ -102,7 +102,7 @@ class DeviceMixin:
                 self.controller.disconnect()
             self.controller.release_device()
             self.license_var.set("Unknown")
-            self.hdr_status_var.set("HDR: unknown")
+            self.hdr_status_var.set(self.hdr_status_text(None))
             self.hdr_enabled_var.set(False)
             self.license_ok_seen = False
             self.last_export_var.set("Last export: -")
@@ -204,58 +204,116 @@ class DeviceMixin:
 
     def check_license_status(self, allow_cached=False):
         if not self.controller:
-            self.license_var.set("Unknown")
+            self._set_license_status_text("Unknown")
             return False
+        if allow_cached and self.license_ok_seen:
+            self._set_license_status_text("Licensed")
+            self._log_async("Using cached Hera license status for acquisition start.", detail=True)
+            return True
         try:
             status, licensed, expiry_license, expiry_cert = self.controller.is_licensed()
         except Exception as exc:
             if allow_cached and self.license_ok_seen:
-                self.license_var.set("Licensed")
-                self.log(f"License recheck failed after an earlier successful check; continuing: {exc}")
+                self._set_license_status_text("Licensed")
+                self._log_async(f"License recheck failed after an earlier successful check; continuing: {exc}")
                 return True
-            self.license_var.set("License check failed")
-            self.log(f"License check failed: {exc}")
+            self._set_license_status_text("License check failed")
+            self._log_async(f"License check failed: {exc}")
             return False
         if status != 0:
             if allow_cached and self.license_ok_seen:
-                self.license_var.set("Licensed")
-                self.log(
+                self._set_license_status_text("Licensed")
+                self._log_async(
                     "License recheck returned an SDK error after an earlier successful check; "
                     f"continuing: {self.controller.get_last_error()}"
                 )
                 return True
-            self.license_var.set("License check failed")
-            self.log(self.controller.get_last_error())
+            self._set_license_status_text("License check failed")
+            self._log_async(self.controller.get_last_error())
             return False
         if licensed:
-            self.license_var.set("Licensed")
+            self._set_license_status_text("Licensed")
             self.license_ok_seen = True
-            self.log(f"Hera SDK is licensed. License expiry UTC={expiry_license}, certificate expiry UTC={expiry_cert}")
+            self._log_async(f"Hera SDK is licensed. License expiry UTC={expiry_license}, certificate expiry UTC={expiry_cert}")
             return True
         if allow_cached and self.license_ok_seen:
-            self.license_var.set("Licensed")
-            self.log("License recheck reported inactive after an earlier successful check; continuing with acquisition.")
+            self._set_license_status_text("Licensed")
+            self._log_async("License recheck reported inactive after an earlier successful check; continuing with acquisition.")
             return True
-        self.license_var.set("Not licensed")
-        self.log("Hera SDK license is not active.")
+        self._set_license_status_text("Not licensed")
+        self._log_async("Hera SDK license is not active.")
         return False
+
+    def _set_license_status_text(self, text):
+        if self._is_ui_thread():
+            self.license_var.set(text)
+        else:
+            self._set_var_async(self.license_var, text)
 
     def refresh_hdr_status(self):
         if not self.controller or not self.controller.connected:
-            self.hdr_status_var.set("HDR: unknown")
+            self.hdr_status_var.set(self.hdr_status_text(None))
             return False
         try:
             if not self.controller.is_hdr_supported():
                 self.hdr_enabled_var.set(False)
-                self.hdr_status_var.set("HDR: not supported")
+                self.hdr_status_var.set("HDR mode: not supported")
                 self.log("HDR mode is not supported by this Hera device or SDK DLL.", detail=True)
                 return False
             actual_hdr = self.controller.get_hdr()
             self.hdr_enabled_var.set(actual_hdr)
-            self.hdr_status_var.set("HDR: on" if actual_hdr else "HDR: off")
-            self.log(f"HDR mode supported. Current camera HDR mode: {'on' if actual_hdr else 'off'}.", detail=True)
+            self.hdr_status_var.set(self.hdr_status_text(actual_hdr))
+            self.log(f"HDR mode supported. Current camera HDR mode: {self.hdr_mode_text(actual_hdr)}.", detail=True)
             return True
         except Exception as exc:
-            self.hdr_status_var.set("HDR: check failed")
+            self.hdr_status_var.set("HDR mode: check failed")
             self.log(f"Could not read HDR support/status: {exc}", detail=True)
+            return False
+
+    def initialize_hdr_mode_on_connect(self):
+        if not self.controller or not self.controller.connected:
+            self.hdr_enabled_var.set(False)
+            self.hdr_status_var.set(self.hdr_status_text(None))
+            return False
+        try:
+            if not self.controller.is_hdr_supported():
+                self.hdr_enabled_var.set(False)
+                self.hdr_status_var.set("HDR mode: not supported")
+                self.log("HDR mode is not supported by this Hera device or SDK DLL.", detail=True)
+                return False
+
+            previous_hdr = None
+            try:
+                previous_hdr = self.controller.get_hdr()
+            except Exception as exc:
+                self.log(f"Could not read previous camera HDR mode during connect: {exc}", detail=True)
+
+            requested_hdr = bool(getattr(self, "hdr_startup_default_enabled", False))
+            self.controller.set_hdr(requested_hdr)
+            time.sleep(0.2)
+            actual_hdr = self.controller.get_hdr()
+            self.hdr_enabled_var.set(actual_hdr)
+            self.hdr_status_var.set(self.hdr_status_text(actual_hdr))
+            previous_text = self.hdr_mode_text(previous_hdr)
+            self.log(
+                "HDR mode supported. Startup HDR "
+                f"requested={self.hdr_mode_text(requested_hdr)}, previous={previous_text}, "
+                f"actual={self.hdr_mode_text(actual_hdr)}.",
+                detail=True,
+            )
+            return True
+        except Exception as exc:
+            try:
+                actual_hdr = self.controller.get_hdr()
+                self.hdr_enabled_var.set(actual_hdr)
+                self.hdr_status_var.set(self.hdr_status_text(actual_hdr))
+                self.log(
+                    "Could not apply startup HDR default; using camera readback "
+                    f"{self.hdr_mode_text(actual_hdr)}: {exc}",
+                    detail=True,
+                )
+            except Exception:
+                self.hdr_enabled_var.set(False)
+                self.hdr_status_var.set("HDR mode: check failed")
+                self.log(f"Could not initialize HDR mode on connect: {exc}", detail=True)
             return False

@@ -1,6 +1,8 @@
 import ctypes
+import faulthandler
 import msvcrt
 import os
+import queue
 import sys
 import tempfile
 import threading
@@ -65,6 +67,24 @@ class HeraTriggerApp(
         3: "Mono14",
         4: "Mono16",
     }
+    HDR_DYNAMIC_RANGE_TEXT = "Dynamic Range 16-bit HDR"
+    HDR_DYNAMIC_RANGE_SHORT_TEXT = "Dynamic Range HDR"
+    HDR_SENSITIVITY_TEXT = "Sensitivity 12-bit"
+    HDR_CHECKBOX_TEXT = "Dynamic Range (16-bit HDR)"
+
+    @classmethod
+    def hdr_mode_text(cls, enabled, short=False):
+        if enabled is None:
+            return "unknown"
+        if bool(enabled):
+            return cls.HDR_DYNAMIC_RANGE_SHORT_TEXT if short else cls.HDR_DYNAMIC_RANGE_TEXT
+        return cls.HDR_SENSITIVITY_TEXT
+
+    @classmethod
+    def hdr_status_text(cls, enabled):
+        if enabled is None:
+            return "HDR mode: unknown"
+        return f"HDR mode: {cls.hdr_mode_text(enabled)}"
 
     @staticmethod
     def default_tango_dll_path():
@@ -78,6 +98,10 @@ class HeraTriggerApp(
 
     def __init__(self):
         super().__init__()
+        self.ui_thread_id = threading.get_ident()
+        self.ui_call_queue = queue.Queue()
+        self.ui_queue_poll_job = None
+        self.ui_queue_poll_interval_ms = 25
         self.title("Hera + Tango Trigger Control")
         self.geometry("1400x900")
         self.minsize(1240, 800)
@@ -90,6 +114,7 @@ class HeraTriggerApp(
         self.positions = []
         self.selected_position_index = None
         self.processing_lock = threading.Lock()
+        self.acquisition_start_lock = threading.Lock()
         self.stage_lock = threading.Lock()
         self.live_frame_lock = threading.Lock()
         self.hypercube_read_lock = threading.Lock()
@@ -122,32 +147,42 @@ class HeraTriggerApp(
         self.current_cycle_var = tk.StringVar(value="Cycle: -")
         self.current_site_var = tk.StringVar(value="Site: -")
         self.last_export_var = tk.StringVar(value="Last export: -")
+        self.run_progress_var = tk.DoubleVar(value=0.0)
+        self.run_progress_text_var = tk.StringVar(value="Progress: idle")
+        self.run_progress_mode = "determinate"
         self.default_output_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), "output")
         self.show_detail_log_var = tk.BooleanVar(value=False)
         self.detail_log_messages = []
         self.background_log_path = os.path.join(self.default_output_dir, "hera_background_status.log")
         self.last_issues_log_path = os.path.join(self.default_output_dir, "hera_last_issues.log")
+        self.fatal_crash_log_path = os.path.join(self.default_output_dir, "hera_fatal_crash.log")
+        self._fatal_crash_log_file = None
         self.detail_log_path = self.background_log_path
         self.recent_issue_messages = []
         self._original_sys_excepthook = sys.excepthook
         self._original_threading_excepthook = getattr(threading, "excepthook", None)
         self._installed_sys_excepthook = None
         self._installed_threading_excepthook = None
+        self._install_fatal_crash_logging()
         self._install_background_exception_logging()
         self._write_startup_log_marker()
         self.hyperlab_shortcut_var = tk.StringVar(value=r"C:\Users\Public\Desktop\Nireos HyperLAB.lnk")
         self.hypercube_summary_var = tk.StringVar(value="Cube: waiting for acquisition")
         self.live_view_status_var = tk.StringVar(value="Live view: waiting for frames")
         self.hdr_enabled_var = tk.BooleanVar(value=False)
-        self.hdr_status_var = tk.StringVar(value="HDR: unknown")
+        self.hdr_status_var = tk.StringVar(value=self.hdr_status_text(None))
+        self.hdr_startup_default_enabled = False
         self.live_cursor_var = tk.StringVar(value=self._live_cursor_status_text("-"))
         self.pending_export_tag = None
         self.live_photo = None
         self.live_frame_info = None
         self.latest_live_frame = None
         self.latest_live_profile = None
+        self.latest_live_is_hdr = None
+        self.latest_live_mode_text = "unknown"
+        self.live_hdr_requested = False
         self.live_autocontrast_var = tk.BooleanVar(value=True)
-        self.live_show_saturation_var = tk.BooleanVar(value=False)
+        self.live_show_saturation_var = tk.BooleanVar(value=True)
         self.live_cross_enabled_var = tk.BooleanVar(value=False)
         self.live_profile_status_var = tk.StringVar(value="Cross: center")
         self.live_cross_point = None
@@ -160,6 +195,7 @@ class HeraTriggerApp(
         self.live_pan_drag_start = None
         self.live_display_rect = None
         self.live_display_frame_size = None
+        self.live_sensor_frame_size = None
         self.live_cursor_image_xy = None
         self.live_roi_selecting = False
         self.live_roi_points = []
@@ -178,6 +214,7 @@ class HeraTriggerApp(
         self.live_first_frame_logged = False
         self.live_first_frame_rendered = False
         self.live_watchdog_job = None
+        self.live_accept_frames = False
         self.live_render_pending = False
         self.last_live_render_time = 0.0
         self.live_render_interval_sec = 0.10
@@ -186,6 +223,9 @@ class HeraTriggerApp(
         self.acquisition_requested_roi = None
         self.acquisition_camera_roi = None
         self.acquisition_requested_hdr = False
+        self.acquisition_pre_start_hdr = None
+        self.acquisition_start_perf_time = None
+        self.hdr_pixel_format_diagnostics_enabled = False
         self.live_max_preview_width = 480
         self.live_display_rotation_degrees = 90
         self.live_auth_warning_logged = False
@@ -213,18 +253,19 @@ class HeraTriggerApp(
         self.hyper_cursor_pending_pixel = None
         self.hyper_cross_enabled_var = tk.BooleanVar(value=True)
         self.hyper_display_mode_var = tk.StringVar(value="Normalized")
+        self.default_hyper_wavelength_nm = 600.0
         self.hyper_display_rect = None
         self.flatfield_hypercube_handle = None
         self.flatfield_info = None
-        self.flatfield_status_var = tk.StringVar(value="Flatfield: none")
+        self.flatfield_status_var = tk.StringVar(value="none")
         self.flatfield_output_path_var = tk.StringVar(value=self.default_output_dir)
         self.flatfield_name_var = tk.StringVar(value="flatfield")
         self.flatfield_append_time_var = tk.BooleanVar(value=True)
         self.export_name_var = tk.StringVar(value="")
-        self.export_append_time_var = tk.BooleanVar(value=True)
-        self.export_raw_var = tk.BooleanVar(value=True)
-        self.export_flatfield_var = tk.BooleanVar(value=True)
-        self.export_normalized_var = tk.BooleanVar(value=True)
+        self.export_append_time_var = tk.BooleanVar(value=False)
+        self.export_raw_var = tk.BooleanVar(value=False)
+        self.export_flatfield_var = tk.BooleanVar(value=False)
+        self.export_normalized_var = tk.BooleanVar(value=False)
         self.pending_acquisition_role = "sample"
         self.pending_save_context = None
         self.pending_acquisition_auto_save = True
@@ -251,6 +292,7 @@ class HeraTriggerApp(
         self._build_ui()
         self.refresh_positions_tree()
         self.update_state("Idle")
+        self._start_ui_call_queue_pump()
         self.start_stage_polling()
         self._safe_after(250, self.auto_connect_devices)
         self._safe_after(5000, self.start_nis_z_polling)
@@ -308,9 +350,34 @@ class HeraTriggerApp(
                 "=== HERA app started ===",
                 f"Background log: {self.detail_log_path}",
                 f"Last issues summary: {self.last_issues_log_path}",
+                f"Fatal crash log: {self.fatal_crash_log_path}",
             ],
         )
         self._write_last_issues_log()
+
+    def _install_fatal_crash_logging(self):
+        try:
+            os.makedirs(os.path.dirname(self.fatal_crash_log_path), exist_ok=True)
+            self._fatal_crash_log_file = open(self.fatal_crash_log_path, "a", encoding="utf-8")
+            self._fatal_crash_log_file.write(f"\n{self._log_timestamp()} | === fatal crash logging enabled ===\n")
+            self._fatal_crash_log_file.flush()
+            faulthandler.enable(file=self._fatal_crash_log_file, all_threads=True)
+        except Exception:
+            self._fatal_crash_log_file = None
+
+    def _restore_fatal_crash_logging(self):
+        try:
+            if faulthandler.is_enabled():
+                faulthandler.disable()
+        except Exception:
+            pass
+        log_file = getattr(self, "_fatal_crash_log_file", None)
+        if log_file:
+            try:
+                log_file.close()
+            except Exception:
+                pass
+        self._fatal_crash_log_file = None
 
     def _safe_log_var(self, var, fallback="-"):
         try:
@@ -523,12 +590,19 @@ class HeraTriggerApp(
             return
         self._write_detail_log_line("Close requested; starting cleanup.")
         self.is_closing = True
+        self.live_accept_frames = False
         self.shutdown_complete_event.clear()
         self.timelapse_stop_event.set()
         self.timelapse_pause_event.clear()
         self.acquisition_done_event.set()
         self.resume_live_after_acquisition = False
-        for job_attr in ("stage_poll_job", "nis_z_poll_job", "live_watchdog_job", "_auto_apply_parameters_job"):
+        for job_attr in (
+            "stage_poll_job",
+            "nis_z_poll_job",
+            "live_watchdog_job",
+            "_auto_apply_parameters_job",
+            "ui_queue_poll_job",
+        ):
             job = getattr(self, job_attr, None)
             if job:
                 try:
@@ -586,6 +660,7 @@ class HeraTriggerApp(
         except (RuntimeError, tk.TclError):
             pass
         self._restore_background_exception_logging()
+        self._restore_fatal_crash_logging()
 
     def _force_exit_after_shutdown_timeout(self):
         self._write_detail_log_line("Shutdown watchdog forced process exit after cleanup timeout.")

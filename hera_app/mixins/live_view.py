@@ -16,13 +16,25 @@ class LiveViewMixin:
             return
         try:
             if self.controller.is_live_capturing():
+                self.live_accept_frames = True
                 self.log("Hera live capture already running.")
                 return
             hdr_requested = bool(self.hdr_enabled_var.get())
+            self.live_hdr_requested = hdr_requested
+            live_hdr_mode = hdr_requested
             supported_formats = []
             for pixel_format, pixel_name in self.LIVE_PIXEL_FORMATS.items():
-                if self.controller.is_pixel_format_supported(pixel_format, hdr=hdr_requested):
+                if self.controller.is_pixel_format_supported(pixel_format, hdr=live_hdr_mode):
                     supported_formats.append((pixel_format, pixel_name))
+            if hdr_requested and not supported_formats:
+                self.log(
+                    "Live view Dynamic Range HDR was requested, but the SDK reported no compatible live pixel formats. "
+                    f"Starting live preview in {self.hdr_mode_text(False)} mode instead."
+                )
+                live_hdr_mode = False
+                for pixel_format, pixel_name in self.LIVE_PIXEL_FORMATS.items():
+                    if self.controller.is_pixel_format_supported(pixel_format, hdr=live_hdr_mode):
+                        supported_formats.append((pixel_format, pixel_name))
             if supported_formats:
                 self.log(
                     "Supported live pixel formats: " + ", ".join(name for _, name in supported_formats),
@@ -37,22 +49,28 @@ class LiveViewMixin:
             if selected_format is None:
                 self.log(
                     "Live view could not start: no supported live pixel format reported by the SDK "
-                    f"for {'HDR' if hdr_requested else 'non-HDR'} mode."
+                    f"for {self.hdr_mode_text(hdr_requested)} mode."
                 )
                 self._set_live_view_status("Live view: no supported pixel format")
                 return
+            self.live_accept_frames = True
             self.controller.start_live_capture(pixel_format=selected_format)
+            self.latest_live_is_hdr = None
             self.live_first_frame_logged = False
             self.live_first_frame_rendered = False
-            self._set_live_view_status(f"Live view: starting ({self.live_pixel_format_name})")
+            mode_note = self.hdr_mode_text(live_hdr_mode, short=True)
+            if hdr_requested and not live_hdr_mode:
+                mode_note = f"{mode_note} fallback"
+            self._set_live_view_status(f"Live view: starting ({self.live_pixel_format_name}, {mode_note})")
             if self.live_watchdog_job:
                 try:
                     self.after_cancel(self.live_watchdog_job)
                 except Exception:
                     pass
             self.live_watchdog_job = self._safe_after(8000, self._check_live_view_started)
-            self.log(f"Hera live capture started using {self.live_pixel_format_name}.")
+            self.log(f"Hera live capture started using {self.live_pixel_format_name} ({mode_note}).")
         except Exception as exc:
+            self.live_accept_frames = False
             self._set_live_view_status("Live view: failed to start")
             self.log(f"Live view could not start: {exc}")
 
@@ -65,6 +83,7 @@ class LiveViewMixin:
 
         def worker():
             try:
+                self.live_accept_frames = False
                 self.controller.stop_live_capture(silent=True)
                 self.controller.wait_for_live_capture_stopped(timeout_sec=5.0)
                 self.controller.unregister_live_callbacks()
@@ -80,6 +99,7 @@ class LiveViewMixin:
         if not self.controller:
             return
         try:
+            self.live_accept_frames = False
             self.controller.stop_live_capture(silent=True)
             self.controller.wait_for_live_capture_stopped(timeout_sec=5.0)
             self.controller.unregister_live_callbacks()
@@ -144,7 +164,7 @@ class LiveViewMixin:
 
     def on_live_capture_frame(self, capture_handle):
         try:
-            if self.is_closing:
+            if self.is_closing or not getattr(self, "live_accept_frames", False):
                 return
             info = self.controller.get_live_capture_info(capture_handle)
             live_is_hdr = None
@@ -159,6 +179,7 @@ class LiveViewMixin:
 
             width = info["width"]
             height = info["height"]
+            self._remember_live_sensor_frame_size(width, height)
             bit_depth = info["bit_depth"]
             row_stride = info["row_stride"]
             bits_per_pixel = info["bits_per_pixel"]
@@ -183,12 +204,27 @@ class LiveViewMixin:
             )
             _, preview_min, preview_max = self._normalize_grayscale_for_display(display_bytes)
             threshold_display = self._display_saturation_threshold(saturation_threshold, bit_depth, bits_per_pixel)
+            if live_is_hdr is None:
+                live_hdr_text = "unknown"
+            else:
+                live_hdr_text = self.hdr_mode_text(live_is_hdr, short=True)
+            requested_hdr = bool(getattr(self, "live_hdr_requested", False))
+            requested_mode_text = self.hdr_mode_text(requested_hdr, short=True)
+            live_mode_text = self._live_frame_mode_text(
+                live_is_hdr,
+                requested_hdr,
+                bit_depth,
+                bits_per_pixel,
+                saturation_threshold,
+            )
 
             with self.live_frame_lock:
-                self.live_frame_info = (width, height, bits_per_pixel)
+                self.live_frame_info = (width, height, bit_depth, bits_per_pixel)
                 self.latest_live_frame = (disp_width, disp_height, display_bytes, saturation_mask)
                 self.latest_live_profile = (disp_width, disp_height, display_bytes, threshold_display)
-            self._set_live_view_status(f"Live view: receiving {self.live_pixel_format_name}")
+                self.latest_live_is_hdr = live_is_hdr
+                self.latest_live_mode_text = live_mode_text
+            self._set_live_view_status(f"Live view: receiving {self.live_pixel_format_name}, {live_mode_text}")
             if not self.live_first_frame_logged:
                 self.live_first_frame_logged = True
                 if self.live_watchdog_job:
@@ -199,9 +235,17 @@ class LiveViewMixin:
                     self.live_watchdog_job = None
                 self._log_async(
                     f"First live frame received: {width}x{height}, bitDepth={bit_depth}, "
-                    f"bitsPerPixel={bits_per_pixel}, format={self.live_pixel_format_name}",
+                    f"bitsPerPixel={bits_per_pixel}, format={self.live_pixel_format_name}, "
+                    f"liveMode={live_mode_text}, sdkLiveFlagMode={live_hdr_text}, requestedMode={requested_mode_text}",
                     detail=True,
                 )
+                if live_is_hdr is not None and live_is_hdr != requested_hdr:
+                    self._log_async(
+                        "Live HDR flag mismatch: "
+                        f"checkbox requested {requested_mode_text}, "
+                        f"but HeraAPI_GetLiveCaptureIsHDR reports {live_hdr_text}. "
+                        f"format={self.live_pixel_format_name}, saturation_threshold={saturation_threshold}.",
+                    )
                 self._log_async(f"Live preview auto-contrast range: min={preview_min}, max={preview_max}", detail=True)
                 self._log_async(
                     f"Live saturation threshold from SDK: {saturation_threshold} (display scale: {threshold_display})",
@@ -247,11 +291,17 @@ class LiveViewMixin:
             return
 
         supported_names = []
+        fallback_supported_names = []
         hdr_requested = bool(self.hdr_enabled_var.get())
         for pixel_format, pixel_name in self.LIVE_PIXEL_FORMATS.items():
             try:
                 if self.controller.is_pixel_format_supported(pixel_format, hdr=hdr_requested):
                     supported_names.append(pixel_name)
+            except Exception:
+                pass
+            try:
+                if hdr_requested and self.controller.is_pixel_format_supported(pixel_format, hdr=False):
+                    fallback_supported_names.append(pixel_name)
             except Exception:
                 pass
 
@@ -262,17 +312,57 @@ class LiveViewMixin:
             f"first_frame={self.live_first_frame_logged}, "
             f"first_render={self.live_first_frame_rendered}, "
             f"selected_format={self.live_pixel_format_name}, "
+            f"last_frame_mode={getattr(self, 'latest_live_mode_text', self.hdr_mode_text(self.latest_live_is_hdr, short=True))}, "
+            f"requested_mode={self.hdr_mode_text(hdr_requested, short=True)}, "
             f"supported={supported_names or ['none']}"
+            + (f", Sensitivity fallback={fallback_supported_names or ['none']}" if hdr_requested else "")
         )
         if self.live_frame_info:
-            width, height, bits_per_pixel = self.live_frame_info
+            width, height, bit_depth, bits_per_pixel = self._live_frame_info_parts(self.live_frame_info)
             self.log(
                 "Live diagnostics: "
                 f"last_frame={width}x{height}, "
-                f"bits={bits_per_pixel}"
+                f"bitDepth={bit_depth}, "
+                f"bitsPerPixel={bits_per_pixel}"
             )
         else:
             self.log("Live diagnostics: no live frame metadata available yet.")
+
+    def _live_frame_info_parts(self, frame_info):
+        if not frame_info:
+            return 0, 0, 0, 0
+        if len(frame_info) >= 4:
+            return frame_info[0], frame_info[1], frame_info[2], frame_info[3]
+        if len(frame_info) == 3:
+            return frame_info[0], frame_info[1], frame_info[2], frame_info[2]
+        if len(frame_info) == 2:
+            return frame_info[0], frame_info[1], 0, 0
+        return 0, 0, 0, 0
+
+    def _remember_live_sensor_frame_size(self, width, height):
+        if width <= 0 or height <= 0:
+            return
+        current = getattr(self, "live_sensor_frame_size", None)
+        if not current or width * height > current[0] * current[1]:
+            self.live_sensor_frame_size = (int(width), int(height))
+
+    def _live_frame_already_matches_roi(self, crop_roi, frame_width, frame_height, src_width, src_height):
+        roi = self._normalize_roi_tuple(crop_roi)
+        if not roi or frame_width <= 0 or frame_height <= 0:
+            return False
+        roi_x, roi_y, roi_w, roi_h = roi
+        if abs(frame_width - roi_w) <= 2 and abs(frame_height - roi_h) <= 2:
+            return True
+        sensor_size = getattr(self, "live_sensor_frame_size", None)
+        if sensor_size:
+            sensor_w, sensor_h = sensor_size
+            if sensor_w > 0 and sensor_h > 0 and (frame_width < sensor_w or frame_height < sensor_h):
+                return True
+        if roi_x >= frame_width or roi_y >= frame_height:
+            return True
+        if src_width <= 2 or src_height <= 2:
+            return True
+        return False
 
     def _fit_dimensions(self, src_width, src_height, dest_width, dest_height):
         if src_width <= 0 or src_height <= 0:
@@ -369,12 +459,14 @@ class LiveViewMixin:
     def _crop_live_frame_bytes(self, gray_bytes, saturation_mask, src_width, src_height, frame_width, frame_height, roi_x, roi_y, roi_w, roi_h):
         if src_width <= 0 or src_height <= 0 or frame_width <= 0 or frame_height <= 0:
             return gray_bytes, saturation_mask, src_width, src_height, 0, 0
+        if roi_x >= frame_width or roi_y >= frame_height:
+            return gray_bytes, saturation_mask, src_width, src_height, roi_x, roi_y
         scale_x = frame_width / src_width
         scale_y = frame_height / src_height
-        ds_x = max(0, int(roi_x / scale_x))
-        ds_y = max(0, int(roi_y / scale_y))
-        ds_x2 = min(src_width, int(math.ceil((roi_x + roi_w) / scale_x)))
-        ds_y2 = min(src_height, int(math.ceil((roi_y + roi_h) / scale_y)))
+        ds_x = max(0, min(src_width - 1, int(roi_x / scale_x)))
+        ds_y = max(0, min(src_height - 1, int(roi_y / scale_y)))
+        ds_x2 = max(ds_x + 1, min(src_width, int(math.ceil((roi_x + roi_w) / scale_x))))
+        ds_y2 = max(ds_y + 1, min(src_height, int(math.ceil((roi_y + roi_h) / scale_y))))
         ds_w = max(1, ds_x2 - ds_x)
         ds_h = max(1, ds_y2 - ds_y)
         cropped = bytearray(ds_w * ds_h)
@@ -423,11 +515,42 @@ class LiveViewMixin:
         threshold = int(saturation_threshold or 0)
         if threshold <= 0:
             return None
-        effective_depth = bit_depth if bit_depth > 0 else bits_per_pixel
+        effective_depth = self._live_effective_display_depth(bit_depth, bits_per_pixel, threshold)
         if effective_depth <= 8:
             return max(0, min(255, threshold))
         max_value = float((1 << effective_depth) - 1)
         return max(0, min(255, int(round((threshold / max_value) * 255.0))))
+
+    def _live_threshold_uses_storage_depth(self, bit_depth, bits_per_pixel, saturation_threshold):
+        effective_depth = bit_depth if bit_depth > 0 else bits_per_pixel
+        storage_depth = bits_per_pixel if bits_per_pixel > 0 else effective_depth
+        threshold = int(saturation_threshold or 0)
+        return (
+            threshold > 0
+            and effective_depth > 0
+            and storage_depth > effective_depth
+            and threshold > ((1 << effective_depth) - 1)
+        )
+
+    def _live_effective_display_depth(self, bit_depth, bits_per_pixel, saturation_threshold=0):
+        effective_depth = bit_depth if bit_depth > 0 else bits_per_pixel
+        storage_depth = bits_per_pixel if bits_per_pixel > 0 else effective_depth
+        if self._live_threshold_uses_storage_depth(bit_depth, bits_per_pixel, saturation_threshold):
+            return storage_depth
+        return effective_depth
+
+    def _live_frame_mode_text(self, live_is_hdr, requested_hdr, bit_depth, bits_per_pixel, saturation_threshold):
+        if live_is_hdr is True:
+            return self.hdr_mode_text(True, short=True)
+        if live_is_hdr is False and not requested_hdr:
+            return self.hdr_mode_text(False, short=True)
+        if requested_hdr and self._live_threshold_uses_storage_depth(bit_depth, bits_per_pixel, saturation_threshold):
+            return f"{self.hdr_mode_text(True, short=True)} (live flag mismatch)"
+        if live_is_hdr is False:
+            return self.hdr_mode_text(False, short=True)
+        if requested_hdr:
+            return self.hdr_mode_text(True, short=True)
+        return "unknown"
 
     def _extract_live_preview_bytes(self, raw_buffer, width, height, row_stride, bytes_per_pixel, bit_depth, bits_per_pixel, saturation_threshold, scale):
         display_width = max(1, math.ceil(width / scale))
@@ -455,7 +578,7 @@ class LiveViewMixin:
             return sampled, display_width, display_height, bytes(saturation_mask[:len(sampled)])
 
         if bytes_per_pixel == 2:
-            effective_depth = bit_depth if bit_depth > 0 else bits_per_pixel
+            effective_depth = self._live_effective_display_depth(bit_depth, bits_per_pixel, saturation_threshold)
             shift = max(effective_depth - 8, 0)
             sampled = bytearray(display_width * display_height)
             dst_index = 0
@@ -474,7 +597,7 @@ class LiveViewMixin:
                     dst_index += 1
             return bytes(sampled[:dst_index]), display_width, max(1, dst_index // display_width), bytes(saturation_mask[:dst_index])
 
-        effective_depth = bit_depth if bit_depth > 0 else bits_per_pixel
+        effective_depth = self._live_effective_display_depth(bit_depth, bits_per_pixel, saturation_threshold)
         max_value = float((1 << effective_depth) - 1) if effective_depth > 0 else 65535.0
         sampled = bytearray(display_width * display_height)
         dst_index = 0
@@ -858,11 +981,11 @@ class LiveViewMixin:
         if len(values) < 2:
             canvas.create_text(8, 8, anchor="nw", text="Horizontal", fill=self.theme["muted"], font=("Segoe UI", 8))
             return
-        data_max = max(values)
-        y_max = max(threshold if threshold is not None else 0, data_max, 1)
+        y_max = 255
         plot_w = max(width - 2 * pad, 1)
         plot_h = max(height - 2 * pad, 1)
         if threshold is not None:
+            threshold = max(0, min(y_max, int(threshold)))
             ty = height - pad - (threshold / y_max) * plot_h
             canvas.create_line(pad, ty, width - pad, ty, fill="#e84b4b", width=1)
             canvas.create_text(width - pad, ty - 3, anchor="se", text=str(threshold), fill="#e84b4b", font=("Segoe UI", 7))
@@ -887,11 +1010,11 @@ class LiveViewMixin:
         if len(values) < 2:
             canvas.create_text(8, 8, anchor="nw", text="Vertical", fill=self.theme["muted"], font=("Segoe UI", 8))
             return
-        data_max = max(values)
-        x_max = max(threshold if threshold is not None else 0, data_max, 1)
+        x_max = 255
         plot_w = max(width - 2 * pad, 1)
         plot_h = max(height - 2 * pad, 1)
         if threshold is not None:
+            threshold = max(0, min(x_max, int(threshold)))
             tx = pad + (threshold / x_max) * plot_w
             canvas.create_line(tx, pad, tx, height - pad, fill="#e84b4b", width=1)
         canvas.create_text(8, 8, anchor="nw", text="Vertical", fill=self.theme["muted"], font=("Segoe UI", 8))
@@ -927,11 +1050,16 @@ class LiveViewMixin:
                 fw = frame_info[0] if frame_info else src_width
                 fh = frame_info[1] if frame_info else src_height
                 rx, ry, rw, rh = crop_roi
-                gray_bytes, saturation_mask, src_width, src_height, cx, cy = self._crop_live_frame_bytes(
-                    gray_bytes, saturation_mask, src_width, src_height, fw, fh, rx, ry, rw, rh
-                )
-                self._live_crop_offset = (cx, cy)
-                frame_info = (rw, rh, frame_info[2] if frame_info else 0)
+                _fw, _fh, bit_depth, bits_per_pixel = self._live_frame_info_parts(frame_info)
+                if self._live_frame_already_matches_roi(crop_roi, fw, fh, src_width, src_height):
+                    self._live_crop_offset = (rx, ry)
+                    frame_info = (fw, fh, bit_depth, bits_per_pixel)
+                else:
+                    gray_bytes, saturation_mask, src_width, src_height, cx, cy = self._crop_live_frame_bytes(
+                        gray_bytes, saturation_mask, src_width, src_height, fw, fh, rx, ry, rw, rh
+                    )
+                    self._live_crop_offset = (cx, cy)
+                    frame_info = (src_width, src_height, bit_depth, bits_per_pixel)
             else:
                 self._live_crop_offset = (0, 0)
             render_bytes = self._prepare_live_display_bytes(gray_bytes)
@@ -973,9 +1101,10 @@ class LiveViewMixin:
         left = (width - out_w) / 2 + self.live_pan_x
         top = (height - out_h) / 2 + self.live_pan_y
         if frame_info:
-            frame_width, frame_height, _ = frame_info
+            frame_width, frame_height, bit_depth, bits_per_pixel = self._live_frame_info_parts(frame_info)
         else:
             frame_width, frame_height = src_width, src_height
+            bit_depth, bits_per_pixel = 0, 0
         with self.live_frame_lock:
             self.live_display_rect = (left, top, out_w, out_h)
             self.live_display_frame_size = (frame_width, frame_height)
@@ -985,12 +1114,16 @@ class LiveViewMixin:
             self._maybe_initialize_roi_fields_from_live_frame(frame_width, frame_height)
         canvas.create_image(left + out_w / 2, top + out_h / 2, image=self.live_photo, anchor="center")
         if frame_info:
-            w, h, bpp = frame_info
+            w, h, bit_depth, bits_per_pixel = self._live_frame_info_parts(frame_info)
+            if bit_depth and bits_per_pixel and bit_depth != bits_per_pixel:
+                bit_text = f"{bit_depth}-bit data / {bits_per_pixel}-bit storage"
+            else:
+                bit_text = f"{bits_per_pixel or bit_depth}-bit"
             canvas.create_text(
                 12,
                 12,
                 anchor="nw",
-                text=f"Live frame: {w} x {h}  |  {bpp}-bit  |  {self.live_pixel_format_name}",
+                text=f"Live frame: {w} x {h}  |  {bit_text}  |  {self.live_pixel_format_name}",
                 fill="#e7edf5",
                 font=("Segoe UI", 9),
             )

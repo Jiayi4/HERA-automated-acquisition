@@ -7,6 +7,62 @@ from hera_app.controllers import HeraController
 
 
 class AcquisitionMixin:
+    def _set_run_progress(self, text=None, percent=None, mode="determinate"):
+        def update():
+            if getattr(self, "is_closing", False):
+                return
+            progressbar = getattr(self, "run_progressbar", None)
+            mode_name = "indeterminate" if mode == "indeterminate" else "determinate"
+            current_mode = getattr(self, "run_progress_mode", "determinate")
+            if progressbar:
+                if current_mode == "indeterminate" and mode_name != "indeterminate":
+                    try:
+                        progressbar.stop()
+                    except Exception:
+                        pass
+                if mode_name == "indeterminate":
+                    if current_mode != "indeterminate":
+                        try:
+                            progressbar.config(mode="indeterminate", maximum=100)
+                            progressbar.start(12)
+                        except Exception:
+                            pass
+                    if percent is not None:
+                        self.run_progress_var.set(max(0.0, min(100.0, float(percent))))
+                else:
+                    try:
+                        progressbar.config(mode="determinate", maximum=100)
+                    except Exception:
+                        pass
+                    if percent is not None:
+                        self.run_progress_var.set(max(0.0, min(100.0, float(percent))))
+                self.run_progress_mode = mode_name
+            elif percent is not None:
+                self.run_progress_var.set(max(0.0, min(100.0, float(percent))))
+            if text is not None:
+                self.run_progress_text_var.set(text)
+
+        self._safe_after(0, update)
+
+    def _set_acquisition_progress(self, progress):
+        try:
+            progress_value = float(progress)
+        except Exception:
+            return
+        fraction = progress_value / 100.0 if progress_value > 1.0 else progress_value
+        pct = max(0, min(100, int(round(fraction * 100.0))))
+        self._set_run_progress(f"Acquiring: {pct}%", pct, mode="determinate")
+        return pct
+
+    def _start_busy_progress(self, text):
+        self._set_run_progress(text, mode="indeterminate")
+
+    def _finish_run_progress(self, text="Progress: complete"):
+        self._set_run_progress(text, 100, mode="determinate")
+
+    def _fail_run_progress(self, text="Progress: error"):
+        self._set_run_progress(text, 0, mode="determinate")
+
     def _set_var_if_changed(self, var, value):
         try:
             if var.get() != value:
@@ -103,6 +159,16 @@ class AcquisitionMixin:
         return export_roi, export_roi, display_w, display_h, "post_export"
 
     def apply_parameters_async(self):
+        busy_states = {
+            self.STATE_LABELS["WaitingForTrigger"],
+            self.STATE_LABELS["Acquiring"],
+            self.STATE_LABELS["ComputingHypercube"],
+            self.STATE_LABELS["Saving"],
+        }
+        start_lock = getattr(self, "acquisition_start_lock", None)
+        if self.app_state in busy_states or (start_lock and start_lock.locked()):
+            self.log("Hera parameter apply skipped while acquisition is active.")
+            return
         if not self.parameter_apply_lock.acquire(blocking=False):
             self.log("Hera parameter apply is already running.")
             return
@@ -153,6 +219,7 @@ class AcquisitionMixin:
             live_was_running = self.controller.is_live_capturing()
             if live_was_running:
                 self._log_async("Stopping Hera live view before applying camera parameters.")
+                self.live_accept_frames = False
                 self.controller.stop_live_capture(silent=True)
                 self.controller.wait_for_live_capture_stopped(timeout_sec=5.0)
                 self.controller.unregister_live_callbacks()
@@ -181,22 +248,28 @@ class AcquisitionMixin:
 
             try:
                 if self.controller.is_hdr_supported():
-                    self.controller.set_hdr(hdr_enabled)
-                    actual_hdr = self.controller.get_hdr()
-                    time.sleep(0.2)
+                    current_hdr = self.controller.get_hdr()
+                    if current_hdr != hdr_enabled:
+                        self.controller.set_hdr(hdr_enabled)
+                        time.sleep(0.2)
+                        actual_hdr = self.controller.get_hdr()
+                    else:
+                        actual_hdr = current_hdr
                     self._safe_after(0, lambda actual_hdr=actual_hdr: self._set_var_if_changed(self.hdr_enabled_var, actual_hdr))
-                    self._set_var_async(self.hdr_status_var, "HDR: on" if actual_hdr else "HDR: off")
-                    self._log_async(f"Set HDR: requested={'on' if hdr_enabled else 'off'}, actual={'on' if actual_hdr else 'off'}")
+                    self._set_var_async(self.hdr_status_var, self.hdr_status_text(actual_hdr))
+                    self._log_async(
+                        f"Set HDR: requested={self.hdr_mode_text(hdr_enabled)}, actual={self.hdr_mode_text(actual_hdr)}"
+                    )
                 else:
                     if hdr_enabled:
                         raise RuntimeError("HDR was requested, but this Hera device or SDK DLL reports HDR is not supported.")
                     self._safe_after(0, lambda: self._set_var_if_changed(self.hdr_enabled_var, False))
-                    self._set_var_async(self.hdr_status_var, "HDR: not supported")
+                    self._set_var_async(self.hdr_status_var, "HDR mode: not supported")
             except Exception as exc:
                 self._log_async(f"HDR mode was not changed: {exc}")
                 if hdr_enabled:
                     raise
-                self._set_var_async(self.hdr_status_var, "HDR: check failed")
+                self._set_var_async(self.hdr_status_var, "HDR mode: check failed")
 
             if self.controller.is_gain_writable():
                 try:
@@ -224,22 +297,36 @@ class AcquisitionMixin:
 
             if apply_roi:
                 requested_roi = self._normalize_roi_tuple((roi_x, roi_y, roi_w, roi_h))
-                if self.controller.is_roi_writable():
+                roi_writable = None
+                try:
+                    roi_writable = self.controller.is_roi_writable()
+                    self._log_async(f"ROI writability before SetROI: {roi_writable}")
+                except Exception as exc:
+                    self._log_async(f"ROI writability check failed before SetROI: {exc}")
+                try:
                     self.controller.set_roi(roi_x, roi_y, roi_w, roi_h)
                     actual_roi = self.controller.get_roi()
                     actual_roi = self._normalize_roi_tuple(actual_roi)
                     self.last_applied_roi = actual_roi
-                    self._log_async(f"Set ROI: requested=({roi_x}, {roi_y}, {roi_w}, {roi_h}), actual={actual_roi}")
+                    self._log_async(
+                        f"Set ROI forced: writable={roi_writable}, "
+                        f"requested=({roi_x}, {roi_y}, {roi_w}, {roi_h}), actual={actual_roi}"
+                    )
                     if actual_roi != (roi_x, roi_y, roi_w, roi_h):
                         self._log_async(
                             "ROI readback differs from the requested ROI. "
                             "The SDK/camera may have rounded or rejected one of the ROI values."
                         )
-                else:
-                    actual_roi = self.controller.get_roi()
-                    actual_roi = self._normalize_roi_tuple(actual_roi)
+                except Exception as exc:
+                    try:
+                        actual_roi = self._normalize_roi_tuple(self.controller.get_roi())
+                    except Exception:
+                        actual_roi = None
                     self.last_applied_roi = actual_roi
-                    self._log_async(f"ROI is read-only on this device. Current ROI: {actual_roi}")
+                    self._log_async(
+                        f"Forced SetROI failed despite Marta diagnostic request: {exc}. "
+                        f"Current ROI: {actual_roi}"
+                    )
                 active_roi = requested_roi
                 if actual_roi == requested_roi or (actual_roi and (actual_roi[0], actual_roi[1]) != (0, 0)):
                     active_roi = actual_roi
@@ -291,17 +378,96 @@ class AcquisitionMixin:
                 self._log_async("Restarting Hera live view after applying parameters.")
                 self._safe_after(0, self.start_live_view)
 
+    def _cancel_pending_auto_apply_parameters(self):
+        job = getattr(self, "_auto_apply_parameters_job", None)
+        if not job:
+            return
+        self._auto_apply_parameters_job = None
+        try:
+            self.after_cancel(job)
+            self.log("Canceled pending automatic parameter apply before starting acquisition.", detail=True)
+        except Exception:
+            pass
+
+    def _release_current_sample_before_new_sample(self):
+        current_handle = self.current_hypercube_handle
+        current_info = self.current_hypercube_info
+        if not current_handle or not current_info or current_info.get("role") == "flatfield":
+            return
+        if current_handle == self.flatfield_hypercube_handle:
+            return
+        try:
+            with self.hypercube_read_lock:
+                self.controller.release_hypercube(current_handle)
+        except Exception as exc:
+            self.log(f"Could not release previous sample cube before starting a new sample: {exc}")
+            return
+        self.current_hypercube_handle = None
+        self.current_hypercube_info = None
+        self.current_hyper_band_cache = {}
+        self.current_hyper_spectrum_cache = {}
+        self.current_hyper_pointer_cache = {}
+        self.hyper_spectrum_request_ids = {
+            key: self.hyper_spectrum_request_ids.get(key, 0) + 1
+            for key in ("selected", "cursor", "warmup")
+        }
+        self.hyper_cursor_spectrum_inflight = False
+        self.hyper_cursor_pending_pixel = None
+        self.hyper_selected_pixel = None
+        self.hyper_cursor_pixel = None
+        self.hyper_selected_spectrum = None
+        self.hyper_cursor_spectrum = None
+        self.hyper_flatfield_spectrum = None
+        self.hyper_spectrum_loading = ""
+        self.hyper_spectrum_error = ""
+        self.pending_save_context = None
+        self._safe_after(
+            0,
+            lambda: (
+                self.hyper_band_scale.config(to=0),
+                self.current_hyper_band_index.set(0),
+                self.current_hyper_band_var.set("Band: -"),
+                self.current_hyper_wavelength_var.set("Wavelength: -"),
+                self.hypercube_summary_var.set("Cube: waiting for acquisition"),
+                self._draw_hyperspectral_view_placeholder("Previous sample released before starting a new acquisition"),
+                self._refresh_export_controls_for_display_mode(),
+            ),
+        )
+        self.log("Released previous sample cube before starting a new sample acquisition to reduce memory usage.")
+
     def _arm_and_start_acquisition(self, export_tag=None, acquisition_role="sample", forced_roi=None, auto_save=True):
+        if not self.acquisition_start_lock.acquire(blocking=False):
+            raise RuntimeError("An acquisition start is already in progress.")
+        parameter_lock_acquired = False
+        try:
+            self._cancel_pending_auto_apply_parameters()
+            if self.parameter_apply_lock.locked():
+                self.log("Waiting for the current Hera parameter apply to finish before starting acquisition.")
+            if not self.parameter_apply_lock.acquire(timeout=20.0):
+                raise RuntimeError("Timed out waiting for Hera parameter apply to finish.")
+            parameter_lock_acquired = True
+            return self._arm_and_start_acquisition_locked(export_tag, acquisition_role, forced_roi, auto_save)
+        finally:
+            if parameter_lock_acquired:
+                self.parameter_apply_lock.release()
+            self.acquisition_start_lock.release()
+
+    def _arm_and_start_acquisition_locked(self, export_tag=None, acquisition_role="sample", forced_roi=None, auto_save=True):
         if not self.controller or not self.controller.connected:
             raise RuntimeError("Connect to Hera before starting acquisition.")
         if not self.check_license_status(allow_cached=True):
             raise RuntimeError("Hera SDK license is not active.")
         if self.controller.is_acquiring():
             raise RuntimeError("The device is already acquiring.")
+        if self.processing_lock.locked():
+            raise RuntimeError("The previous acquisition is still being processed.")
 
+        arm_start_time = time.perf_counter()
         live_was_running = self.controller.is_live_capturing()
         self.resume_live_after_acquisition = live_was_running
         self.acquisition_camera_roi = None
+        if acquisition_role == "sample":
+            self._release_current_sample_before_new_sample()
         if forced_roi is not None:
             forced_roi = self._normalize_roi_tuple(forced_roi)
             self.acquisition_requested_roi = forced_roi
@@ -321,13 +487,16 @@ class AcquisitionMixin:
             else:
                 self.log("No ROI selected for export; hyperspectral cube will use the full returned image.")
         acquisition_hdr_enabled = bool(self.hdr_enabled_var.get())
-        self.log(f"HDR mode for acquisition: {'on' if acquisition_hdr_enabled else 'off'}.", detail=True)
+        self.log(f"HDR mode for acquisition: {self.hdr_mode_text(acquisition_hdr_enabled)}.", detail=True)
         self.log("Preparing Hera camera parameters before starting acquisition.")
+        apply_start_time = time.perf_counter()
         if not self.apply_parameters(restart_live=False, apply_roi=apply_roi, hdr_enabled=acquisition_hdr_enabled):
             if live_was_running and self.controller and self.controller.connected:
                 self.start_live_view()
                 self.resume_live_after_acquisition = False
             raise RuntimeError("Applying Hera parameters failed.")
+        apply_elapsed = time.perf_counter() - apply_start_time
+        self.log(f"Performance timing: camera parameter apply took {apply_elapsed:.2f} s.", detail=True)
         self.acquisition_camera_roi = self._normalize_roi_tuple(self.last_applied_roi) if apply_roi and self.last_applied_roi else None
         if self.acquisition_requested_roi:
             try:
@@ -353,28 +522,61 @@ class AcquisitionMixin:
         if self.save_pending_button:
             self.save_pending_button.config(state="disabled")
 
-        if acquisition_hdr_enabled:
-            try:
-                if self.controller.is_hdr_supported():
-                    self.controller.set_hdr(True)
-                    time.sleep(0.3)
+        try:
+            live_still_running = self.controller.is_live_capturing()
+        except Exception as exc:
+            live_still_running = None
+            self.log(f"Could not verify live capture state immediately before acquisition start: {exc}", detail=True)
+        if live_still_running:
+            self.log("Live capture was still running immediately before hyperspectral start; stopping it again.", detail=True)
+            self.live_accept_frames = False
+            self.controller.stop_live_capture(silent=True)
+            self.controller.wait_for_live_capture_stopped(timeout_sec=5.0)
+            self.controller.unregister_live_callbacks()
+
+        self.acquisition_pre_start_hdr = None
+        try:
+            if self.controller.is_hdr_supported():
+                hdr_confirmed = self.controller.get_hdr()
+                if hdr_confirmed != acquisition_hdr_enabled:
+                    self.controller.set_hdr(acquisition_hdr_enabled)
+                    time.sleep(0.3 if acquisition_hdr_enabled else 0.2)
                     hdr_confirmed = self.controller.get_hdr()
-                    self.log(
-                        f"HDR re-asserted immediately before acquisition start: camera reports HDR={'on' if hdr_confirmed else 'off (camera reset it)'}",
-                        detail=True,
-                    )
-                    self._set_var_async(self.hdr_status_var, "HDR: on" if hdr_confirmed else "HDR: reset by camera")
-            except Exception as exc:
-                self.log(f"HDR re-assert before acquisition failed: {exc}", detail=True)
+                self.acquisition_pre_start_hdr = hdr_confirmed
+                self.log(
+                    "Pre-start HDR readback immediately before "
+                    "HeraAPI_StartHyperspectralDataAcquisitionEx: "
+                    f"requested={self.hdr_mode_text(acquisition_hdr_enabled)}, "
+                    f"camera={self.hdr_mode_text(hdr_confirmed)}, "
+                    f"live_capturing={live_still_running}.",
+                    detail=True,
+                )
+                self._set_var_async(self.hdr_status_var, self.hdr_status_text(hdr_confirmed))
+                if acquisition_hdr_enabled and not hdr_confirmed:
+                    raise RuntimeError("HDR was requested, but HeraAPI_GetHDR returned off immediately before acquisition start.")
+            else:
+                self._set_var_async(self.hdr_status_var, "HDR mode: not supported")
+                if acquisition_hdr_enabled:
+                    raise RuntimeError("HDR was requested, but this Hera device or SDK DLL reports HDR is not supported.")
+                self.log("Pre-start HDR readback skipped because HDR is not supported.", detail=True)
+        except Exception as exc:
+            self.log(f"Pre-start HDR check failed: {exc}", detail=True)
+            if acquisition_hdr_enabled:
+                raise
+        if getattr(self, "hdr_pixel_format_diagnostics_enabled", False):
+            self._log_pre_start_pixel_format_support()
 
         if trigger_mode_name == "Internal":
             if acquisition_role == "flatfield":
                 self.log("Sending software flatfield acquisition command through Hera SDK.")
             else:
                 self.log("Sending software acquisition command through Hera SDK.")
+            self._set_run_progress("Acquiring: 0%", 0, mode="determinate")
         else:
             self.log(f"Arming Hera SDK acquisition with trigger mode '{trigger_mode_name}'.")
+            self._set_run_progress("Waiting for trigger...", 0, mode="determinate")
 
+        self.acquisition_start_perf_time = time.perf_counter()
         self.controller.start_hyperspectral_acquisition(
             scan_mode,
             trigger_mode,
@@ -382,7 +584,33 @@ class AcquisitionMixin:
             stabilization,
         )
         self.update_state("Acquiring" if trigger_mode_name == "Internal" else "WaitingForTrigger")
-        self.log("Hyperspectral acquisition started.")
+        arm_elapsed = time.perf_counter() - arm_start_time
+        self.log(f"Hyperspectral acquisition started. Start preparation took {arm_elapsed:.2f} s.", detail=True)
+
+    def _log_pre_start_pixel_format_support(self):
+        if not self.controller or not self.controller.connected:
+            return
+        api_name = (
+            "HeraAPI_IsPixelFormatSupportedEx"
+            if getattr(self.controller, "HeraAPI_IsPixelFormatSupportedEx", None)
+            else "HeraAPI_IsPixelFormatSupported"
+        )
+        entries = []
+        for pixel_format, pixel_name in self.LIVE_PIXEL_FORMATS.items():
+            states = []
+            for hdr in (False, True):
+                mode_text = self.hdr_mode_text(hdr, short=True)
+                try:
+                    supported = self.controller.is_pixel_format_supported(pixel_format, hdr=hdr)
+                    states.append(f"{mode_text}={'yes' if supported else 'no'}")
+                except Exception as exc:
+                    states.append(f"{mode_text}=error({exc})")
+            entries.append(f"{pixel_name}: " + ", ".join(states))
+        self.log(
+            "Pre-start Live Capture PixelFormat support check "
+            f"using {api_name}: " + "; ".join(entries),
+            detail=True,
+        )
 
     def start_acquisition(self):
         try:
@@ -390,6 +618,7 @@ class AcquisitionMixin:
             self._arm_and_start_acquisition(export_tag=tag, acquisition_role="sample", auto_save=False)
         except Exception as exc:
             self.log(f"Failed to start acquisition: {exc}")
+            self._fail_run_progress("Progress: acquisition failed")
             self.update_state("Error")
 
     def _bool_var_value(self, attr_name, default=False):
@@ -428,8 +657,9 @@ class AcquisitionMixin:
     def _build_acquisition_description(self, cube_hdr_text, cube_is_hdr, role="sample"):
         description = "Generated by AppHeraTriggerPython0417 using Hera SDK and Tango stage control"
         description = f"{description}\nHyperspectral acquisition HDR flag: {cube_hdr_text}"
+        description = f"{description}\nHyperspectral acquisition mode: {self.hdr_mode_text(cube_is_hdr)}"
         if self.acquisition_requested_hdr and cube_is_hdr is False:
-            description = f"{description}\nHDR was requested, but SDK returned non-HDR hyperspectral data"
+            description = f"{description}\nDynamic Range HDR was requested, but SDK returned Sensitivity 12-bit hyperspectral data"
         notes = self.saving_notes_var.get().strip()
         if notes:
             description = f"{description}\nUser notes: {notes}"
@@ -521,23 +751,50 @@ class AcquisitionMixin:
         self._log_async(f"Exported flatfield reference (_ref): {ref_hdr_path}")
         return ref_hdr_path, saved_paths, measurement_dir
 
+    def _build_current_sample_save_context(self):
+        if not self.current_hypercube_handle or not self.current_hypercube_info:
+            return None
+        if self.current_hypercube_info.get("role") == "flatfield":
+            return None
+        cube_is_hdr = self.current_hypercube_info.get("is_hdr")
+        cube_hdr_text = "unknown" if cube_is_hdr is None else ("on" if cube_is_hdr else "off")
+        return {
+            "hypercube_handle": self.current_hypercube_handle,
+            "export_tag": self._sanitize_export_tag(f"sample_{time.strftime('%Y%m%d_%H%M%S')}"),
+            "cube_hdr_text": cube_hdr_text,
+            "cube_is_hdr": cube_is_hdr,
+            "info": dict(self.current_hypercube_info),
+            "role": "sample",
+        }
+
+    def _build_flatfield_save_context(self):
+        if not self.flatfield_hypercube_handle or not self.flatfield_info:
+            return None
+        cube_is_hdr = self.flatfield_info.get("is_hdr")
+        cube_hdr_text = "unknown" if cube_is_hdr is None else ("on" if cube_is_hdr else "off")
+        return {
+            "hypercube_handle": self.flatfield_hypercube_handle,
+            "export_tag": self._sanitize_export_tag(f"flatfield_{time.strftime('%Y%m%d_%H%M%S')}"),
+            "cube_hdr_text": cube_hdr_text,
+            "cube_is_hdr": cube_is_hdr,
+            "info": dict(self.flatfield_info),
+            "role": "flatfield",
+        }
+
     def save_pending_acquisition(self):
         ctx = self.pending_save_context
+        if ctx and ctx.get("role") == "flatfield" and self.current_hypercube_info:
+            ctx = None
         if not ctx:
-            if self.hyper_display_mode_var.get() == "Flatfield" and self.flatfield_hypercube_handle and self.flatfield_info:
-                cube_is_hdr = self.flatfield_info.get("is_hdr")
-                cube_hdr_text = "unknown" if cube_is_hdr is None else ("on" if cube_is_hdr else "off")
-                ctx = {
-                    "hypercube_handle": self.flatfield_hypercube_handle,
-                    "export_tag": self._sanitize_export_tag(f"flatfield_{time.strftime('%Y%m%d_%H%M%S')}"),
-                    "cube_hdr_text": cube_hdr_text,
-                    "cube_is_hdr": cube_is_hdr,
-                    "info": dict(self.flatfield_info),
-                    "role": "flatfield",
-                }
-            else:
-                self.log("No pending acquisition to save.")
+            ctx = self._build_current_sample_save_context()
+        if not ctx:
+            if not self._bool_var_value("export_flatfield_var", True):
+                self.log("No sample cube is loaded. Check _ref to save the flatfield reference.")
                 return
+            ctx = self._build_flatfield_save_context()
+        if not ctx:
+            self.log("No pending acquisition to save.")
+            return
         if self.save_pending_button:
             self.save_pending_button.config(state="disabled")
         self.pending_save_context = None
@@ -551,6 +808,7 @@ class AcquisitionMixin:
         def _do_save():
             try:
                 self._safe_after(0, lambda: self.update_state("Saving"))
+                self._start_busy_progress("Saving selected data...")
                 output_dir = self.param_vars["output_path"].get()
                 os.makedirs(output_dir, exist_ok=True)
                 description = self._build_acquisition_description(cube_hdr_text, cube_is_hdr, role=role)
@@ -577,10 +835,14 @@ class AcquisitionMixin:
                     +
                     f"{measurement_dir} ({', '.join(sorted(saved_paths))})"
                 )
+                self._finish_run_progress("Progress: saved")
                 self._safe_after(0, lambda: self.update_state("Completed"))
+                self._safe_after(0, self._refresh_export_controls_for_display_mode)
             except Exception as exc:
                 self._log_async(f"Save failed: {exc}")
+                self._fail_run_progress("Progress: save failed")
                 self._safe_after(0, lambda: self.update_state("Error"))
+                self._safe_after(0, self._refresh_export_controls_for_display_mode)
 
         threading.Thread(target=_do_save, daemon=True).start()
 
@@ -591,6 +853,7 @@ class AcquisitionMixin:
         try:
             self.controller.abort_hyperspectral_acquisition()
             self.log("Abort request sent to Hera SDK.")
+            self._fail_run_progress("Progress: acquisition aborted")
             self.update_state("Ready")
             self.acquisition_done_event.set()
             if self.resume_live_after_acquisition:
@@ -598,6 +861,7 @@ class AcquisitionMixin:
                 self.start_live_view()
         except Exception as exc:
             self.log(f"Failed to abort acquisition: {exc}")
+            self._fail_run_progress("Progress: abort failed")
             self.update_state("Error")
 
     def _await_acquisition_completion(self, timeout_sec=300):
@@ -613,7 +877,9 @@ class AcquisitionMixin:
                 return
             if self.app_state == self.STATE_LABELS["WaitingForTrigger"] and progress > 0:
                 self.update_state("Acquiring")
-            pct = int(progress * 100)
+            pct = self._set_acquisition_progress(progress)
+            if pct is None:
+                return
             if pct >= 99:
                 progress_notice = "Acquiring: finishing"
             elif pct >= 50:
@@ -633,11 +899,16 @@ class AcquisitionMixin:
 
     def _start_data_processing(self, data_handle, data_status, message):
         self.log(f'Acquisition callback received: status={data_status}, message="{message}"')
+        acquisition_start_time = getattr(self, "acquisition_start_perf_time", None)
+        if acquisition_start_time is not None:
+            acquisition_elapsed = time.perf_counter() - acquisition_start_time
+            self.log(f"Performance timing: SDK acquisition callback arrived after {acquisition_elapsed:.2f} s.", detail=True)
         if data_status != HeraController.HYPERSPECTRAL_DATA_OK:
             self.last_acquisition_error = message or "Hyperspectral acquisition failed or was aborted."
             self.acquisition_success = False
             self.acquisition_done_event.set()
             self.log(self.last_acquisition_error)
+            self._fail_run_progress("Progress: acquisition failed")
             self.update_state("Error")
             return
 
@@ -646,16 +917,20 @@ class AcquisitionMixin:
             self.acquisition_success = False
             self.acquisition_done_event.set()
             self.log(self.last_acquisition_error)
+            self._fail_run_progress("Progress: processing busy")
             return
 
         self.update_state("ComputingHypercube")
+        self._start_busy_progress("Computing hypercube...")
         worker = threading.Thread(target=self._process_acquisition_worker, args=(data_handle,), daemon=True)
         worker.start()
 
     def _process_acquisition_worker(self, data_handle):
         hypercube_handle = None
         viewer_bound = False
+        process_start_time = time.perf_counter()
         try:
+            raw_info_start_time = time.perf_counter()
             width, height, _ = self.controller.get_hyperspectral_data_info(data_handle)
             data_is_hdr = None
             try:
@@ -663,10 +938,17 @@ class AcquisitionMixin:
             except Exception as exc:
                 self._log_async(f"Could not read raw hyperspectral HDR flag: {exc}", detail=True)
             data_hdr_text = "unknown" if data_is_hdr is None else ("on" if data_is_hdr else "off")
-            self._log_async(f"Raw hyperspectral data received: width={width}, height={height}", detail=True)
+            pre_start_hdr = getattr(self, "acquisition_pre_start_hdr", None)
+            pre_start_hdr_text = "unknown" if pre_start_hdr is None else ("on" if pre_start_hdr else "off")
+            self._log_async(
+                "Raw hyperspectral data received: "
+                f"width={width}, height={height}, dataHDR={data_hdr_text}, "
+                f"preStartHDR={pre_start_hdr_text}",
+                detail=True,
+            )
             if self.acquisition_requested_hdr and data_is_hdr is False:
                 self._log_async(
-                    "HDR was requested before acquisition, but the SDK returned non-HDR raw data. "
+                    "Dynamic Range HDR was requested before acquisition, but the SDK returned Sensitivity 12-bit raw data. "
                     "The device acquisition pipeline may not support HDR for this scan configuration.",
                     detail=True,
                 )
@@ -683,6 +965,8 @@ class AcquisitionMixin:
             binning = self.BINNING_OPTIONS[self.param_vars["binning"].get()]
             data_type = self.DATA_TYPES[self.param_vars["data_type"].get()]
 
+            raw_info_elapsed = time.perf_counter() - raw_info_start_time
+            hypercube_compute_start_time = time.perf_counter()
             hypercube_handle = self.controller.get_hypercube(data_handle, data_type, bands, binning)
             cube_width, cube_height, cube_bands, cube_type = self.controller.get_hypercube_info(hypercube_handle)
             cube_is_hdr = None
@@ -690,6 +974,7 @@ class AcquisitionMixin:
                 cube_is_hdr = self.controller.get_hypercube_is_hdr(hypercube_handle)
             except Exception as exc:
                 self._log_async(f"Could not read hypercube HDR flag: {exc}", detail=True)
+            hypercube_compute_elapsed = time.perf_counter() - hypercube_compute_start_time
             cube_hdr_text = "unknown" if cube_is_hdr is None else ("on" if cube_is_hdr else "off")
             if self.acquisition_requested_hdr and cube_is_hdr is False:
                 self._log_async(
@@ -716,7 +1001,14 @@ class AcquisitionMixin:
             )
             self._log_async(
                 f"Hypercube ready: width={cube_width}, height={cube_height}, bands={cube_bands}, "
-                f"dataType={cube_type}",
+                f"dataType={cube_type}, cubeHDR={cube_hdr_text}, preStartHDR={pre_start_hdr_text}",
+                detail=True,
+            )
+            self._log_async(
+                "Performance timing: "
+                f"raw metadata={raw_info_elapsed:.2f} s, "
+                f"hypercube compute={hypercube_compute_elapsed:.2f} s, "
+                f"bands={bands}, binning={self.param_vars['binning'].get()}, dataType={self.param_vars['data_type'].get()}.",
                 detail=True,
             )
             if roi_mode == "camera":
@@ -730,8 +1022,14 @@ class AcquisitionMixin:
                     f"width={display_roi[2]}, height={display_roi[3]}"
                 )
             previous_handle = self.current_hypercube_handle
-            self.current_hypercube_handle = hypercube_handle
-            self.current_hypercube_info = {
+            previous_info = dict(self.current_hypercube_info) if self.current_hypercube_info else None
+            keep_previous_sample = bool(
+                self.pending_acquisition_role == "flatfield"
+                and previous_handle
+                and previous_info
+                and previous_info.get("role") != "flatfield"
+            )
+            new_cube_info = {
                 "width": display_width,
                 "height": display_height,
                 "source_width": cube_width,
@@ -744,6 +1042,9 @@ class AcquisitionMixin:
                 "is_hdr": cube_is_hdr,
                 "role": self.pending_acquisition_role,
             }
+            if not keep_previous_sample:
+                self.current_hypercube_handle = hypercube_handle
+                self.current_hypercube_info = new_cube_info
             self.current_hyper_band_cache = {}
             self.current_hyper_spectrum_cache = {}
             self.current_hyper_pointer_cache = {}
@@ -770,43 +1071,80 @@ class AcquisitionMixin:
                     except Exception:
                         pass
                 self.flatfield_hypercube_handle = hypercube_handle
-                self.flatfield_info = dict(self.current_hypercube_info)
-                self._set_var_async(self.flatfield_status_var, f"Flatfield: {display_width} x {display_height}, bands={cube_bands}")
+                self.flatfield_info = dict(new_cube_info)
+                self._set_var_async(self.flatfield_status_var, f"ready ({display_width} x {display_height}, bands={cube_bands})")
+                if keep_previous_sample:
+                    self.current_hypercube_handle = previous_handle
+                    self.current_hypercube_info = previous_info
+                    summary = (
+                        f"Cube: {previous_info['width']} x {previous_info['height']}, "
+                        f"bands={previous_info['bands']}, type={previous_info['data_type']}"
+                    )
+                    display_sample_roi = previous_info.get("display_roi")
+                    if display_sample_roi:
+                        summary += f" (ROI x={display_sample_roi[0]}, y={display_sample_roi[1]})"
+                    elif previous_info.get("camera_roi"):
+                        summary += " (camera ROI)"
+                    self._set_var_async(self.hypercube_summary_var, summary)
             elif self.hyper_display_mode_var.get() == "Flatfield":
                 next_mode = "Normalized" if self._should_use_flatfield_correction(self.current_hypercube_info) else "Raw"
                 self._set_var_async(self.hyper_display_mode_var, next_mode)
             viewer_bound = True
             is_flatfield_acquisition = self.pending_acquisition_role == "flatfield"
             if is_flatfield_acquisition:
-                self._safe_after(
-                    0,
-                    lambda: (
-                        self.hyper_band_scale.config(to=max(cube_bands - 1, 0)),
-                        self.current_hyper_band_index.set(0),
-                        self.current_hyper_band_var.set(f"Band: 1 / {cube_bands}"),
-                        self.current_hyper_wavelength_var.set("Wavelength: -"),
-                        self._draw_hyperspectral_view_placeholder("Flatfield ready. Press Export to save it as _ref."),
-                    ),
-                )
-                self._log_async("Flatfield cube is ready; deferred preview rendering to avoid a full-frame memory spike.")
+                if keep_previous_sample:
+                    next_mode = "Normalized" if self._should_use_flatfield_correction(self.current_hypercube_info) else "Raw"
+                    self._set_var_async(self.hyper_display_mode_var, next_mode)
+                    sample_bands = int(previous_info["bands"])
+                    default_band = self._default_hyper_band_index_for_info(previous_handle, previous_info)
+                    self._safe_after(
+                        0,
+                        lambda sample_bands=sample_bands, default_band=default_band: (
+                            self.hyper_band_scale.config(to=max(sample_bands - 1, 0)),
+                            self.current_hyper_band_index.set(default_band),
+                            self.render_current_hyper_band(),
+                            self._start_hyper_pointer_cache_warmup(),
+                        ),
+                    )
+                    self._log_async("Flatfield cube is ready; kept the current sample for Raw/Normalized viewing.")
+                else:
+                    default_band = self._default_hyper_band_index_for_info(hypercube_handle, new_cube_info)
+                    self._safe_after(
+                        0,
+                        lambda default_band=default_band: (
+                            self.hyper_band_scale.config(to=max(cube_bands - 1, 0)),
+                            self.current_hyper_band_index.set(default_band),
+                            self.current_hyper_band_var.set(f"Band: {default_band + 1} / {cube_bands}"),
+                            self.current_hyper_wavelength_var.set("Wavelength: -"),
+                            self._draw_hyperspectral_view_placeholder("Flatfield ready. Press Export to save it as _ref."),
+                        ),
+                    )
+                    self._log_async("Flatfield cube is ready; deferred preview rendering to avoid a full-frame memory spike.")
             else:
+                default_band = self._default_hyper_band_index_for_info(hypercube_handle, new_cube_info)
                 self._safe_after(
                     0,
-                    lambda: (
+                    lambda default_band=default_band: (
                         self.hyper_band_scale.config(to=max(cube_bands - 1, 0)),
-                        self.current_hyper_band_index.set(0),
+                        self.current_hyper_band_index.set(default_band),
                         self.render_current_hyper_band(),
                         self._start_hyper_pointer_cache_warmup(),
                     ),
                 )
                 self._log_async("Hyperspectral viewer is ready. Open the Hyperspectral View tab and move the band slider.")
-            if previous_handle and not released_as_flatfield:
+            if previous_handle and not released_as_flatfield and not keep_previous_sample:
                 if previous_handle != self.flatfield_hypercube_handle:
                     try:
                         with self.hypercube_read_lock:
                             self.controller.release_hypercube(previous_handle)
                     except Exception:
                         pass
+
+            postprocess_elapsed = time.perf_counter() - process_start_time - hypercube_compute_elapsed
+            self._log_async(
+                f"Performance timing: post-compute app processing took {postprocess_elapsed:.2f} s.",
+                detail=True,
+            )
 
             if not self.pending_acquisition_auto_save and self.pending_acquisition_role == "flatfield":
                 self.pending_save_context = {
@@ -818,16 +1156,21 @@ class AcquisitionMixin:
                     "cube_height": cube_height,
                     "cube_hdr_text": cube_hdr_text,
                     "cube_is_hdr": cube_is_hdr,
-                    "info": dict(self.current_hypercube_info),
+                    "info": dict(self.flatfield_info),
                     "role": "flatfield",
                 }
                 self.acquisition_success = True
                 self.last_acquisition_error = ""
-                self._set_var_async(self.flatfield_status_var, f"Flatfield: ready ({display_width} x {display_height}, bands={cube_bands})")
-                self._set_var_async(self.hyper_display_mode_var, "Flatfield")
+                self._set_var_async(self.flatfield_status_var, f"ready ({display_width} x {display_height}, bands={cube_bands})")
+                if not keep_previous_sample:
+                    self._set_var_async(self.hyper_display_mode_var, "Flatfield")
                 if self.save_pending_button:
-                    self._safe_after(0, lambda: self.save_pending_button.config(state="normal"))
-                self._log_async("Flatfield acquired and kept in memory. Press Export to save it as _ref.")
+                    self._safe_after(0, self._refresh_export_controls_for_display_mode)
+                if keep_previous_sample:
+                    self._log_async("Flatfield acquired and kept in memory. Use the view mode to export sample products or the flatfield reference.")
+                else:
+                    self._log_async("Flatfield acquired and kept in memory. Press Export to save it as _ref.")
+                self._finish_run_progress("Progress: flatfield ready")
                 self._safe_after(0, lambda: self.update_state("Completed"))
                 return
 
@@ -847,12 +1190,14 @@ class AcquisitionMixin:
                 self.acquisition_success = True
                 self.last_acquisition_error = ""
                 if self.save_pending_button:
-                    self._safe_after(0, lambda: self.save_pending_button.config(state="normal"))
+                    self._safe_after(0, self._refresh_export_controls_for_display_mode)
                 self._log_async("Acquisition complete. Press Export to save the selected data products.")
+                self._finish_run_progress("Progress: acquisition complete")
                 self._safe_after(0, lambda: self.update_state("Completed"))
                 return
 
             self._safe_after(0, lambda: self.update_state("Saving"))
+            self._start_busy_progress("Saving acquisition data...")
             output_dir = self.param_vars["output_path"].get()
             os.makedirs(output_dir, exist_ok=True)
             export_tag = self.pending_export_tag or self._sanitize_export_tag(time.strftime("hera_hypercube_%Y%m%d_%H%M%S"))
@@ -863,7 +1208,7 @@ class AcquisitionMixin:
                     export_tag,
                     output_dir,
                     description,
-                    self.current_hypercube_info,
+                    self.flatfield_info,
                 )
             else:
                 hdr_path, saved_paths, measurement_dir = self._export_measurement_set(
@@ -880,15 +1225,17 @@ class AcquisitionMixin:
                 f"{measurement_dir} ({', '.join(sorted(saved_paths))})"
             )
             if self.pending_acquisition_role == "flatfield":
-                self._set_var_async(self.flatfield_status_var, f"Flatfield: ready ({display_width} x {display_height}, bands={cube_bands})")
+                self._set_var_async(self.flatfield_status_var, f"ready ({display_width} x {display_height}, bands={cube_bands})")
                 self._log_async("Flatfield baseline is ready and saved as _ref.")
             self.acquisition_success = True
             self.last_acquisition_error = ""
+            self._finish_run_progress("Progress: saved")
             self._safe_after(0, lambda: self.update_state("Completed"))
         except Exception as exc:
             self.last_acquisition_error = str(exc)
             self.acquisition_success = False
             self._log_async(f"Failed to process hyperspectral data: {exc}")
+            self._fail_run_progress("Progress: processing failed")
             if viewer_bound and self.current_hypercube_handle == hypercube_handle:
                 self.current_hypercube_handle = None
                 self.current_hypercube_info = None
@@ -928,6 +1275,7 @@ class AcquisitionMixin:
         finally:
             if data_handle:
                 self.controller.release_hyperspectral_data(data_handle)
+            self.acquisition_start_perf_time = None
             self.acquisition_done_event.set()
             self.processing_lock.release()
             if self.resume_live_after_acquisition:

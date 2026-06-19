@@ -1,4 +1,6 @@
 import math
+import threading
+import time
 import tkinter as tk
 
 
@@ -26,16 +28,81 @@ class ROIMixin:
         self.live_pan_x = 0.0
         self.live_pan_y = 0.0
         self.live_roi_button_var.set("Select ROI")
-        with self.live_frame_lock:
-            frame_size = self.live_display_frame_size
-        if frame_size:
-            frame_width, frame_height = frame_size
-            self._set_roi_fields(0, 0, frame_width, frame_height, update_live=False, status=f"ROI: full frame {frame_width} x {frame_height}")
+        if self.controller and self.controller.connected:
+            self.live_roi_status_var.set("ROI: clearing Hera ROI...")
             self.fit_live_view()
-            self.log(f"Live ROI cleared to full frame: width={frame_width}, height={frame_height}.")
+            self.log("Live ROI selection cleared; clearing Hera ROI on the camera.")
         else:
-            self.live_roi_status_var.set("ROI: -")
+            frame_size = getattr(self, "live_sensor_frame_size", None)
+            if not frame_size:
+                with self.live_frame_lock:
+                    frame_size = self.live_display_frame_size
+            if frame_size:
+                frame_width, frame_height = frame_size
+                self._set_roi_fields(0, 0, frame_width, frame_height, update_live=False, status=f"ROI: full frame {frame_width} x {frame_height}")
+                self.fit_live_view()
+                self.log(f"Live ROI cleared to full frame: width={frame_width}, height={frame_height}.")
+            else:
+                self.live_roi_status_var.set("ROI: -")
         self._draw_live_view_placeholder()
+        self._clear_hera_roi_async()
+
+    def _clear_hera_roi_async(self):
+        if not self.controller or not self.controller.connected:
+            return
+        if getattr(self, "app_state", "") in {
+            self.STATE_LABELS["WaitingForTrigger"],
+            self.STATE_LABELS["Acquiring"],
+            self.STATE_LABELS["ComputingHypercube"],
+            self.STATE_LABELS["Saving"],
+        }:
+            self.log("ROI clear on Hera skipped while acquisition is active.")
+            return
+        if not self.parameter_apply_lock.acquire(blocking=False):
+            self.log("ROI clear on Hera skipped because camera parameters are being applied.")
+            return
+
+        def worker():
+            live_was_running = False
+            try:
+                live_was_running = self.controller.is_live_capturing()
+                if live_was_running:
+                    self._log_async("Stopping Hera live view before clearing ROI.")
+                    self.live_accept_frames = False
+                    self.controller.stop_live_capture(silent=True)
+                    self.controller.wait_for_live_capture_stopped(timeout_sec=5.0)
+                    self.controller.unregister_live_callbacks()
+                    self._safe_after(0, self._clear_live_view_frame_state)
+                self.controller.clear_roi()
+                time.sleep(0.2)
+                actual_roi = self._normalize_roi_tuple(self.controller.get_roi())
+                self.last_applied_roi = None
+                if actual_roi and actual_roi[0] == 0 and actual_roi[1] == 0:
+                    self.live_sensor_frame_size = (actual_roi[2], actual_roi[3])
+                self._log_async(f"Hera ROI cleared immediately. Current ROI: {actual_roi}")
+                if actual_roi:
+                    x, y, w, h = actual_roi
+                    self._safe_after(
+                        0,
+                        lambda x=x, y=y, w=w, h=h: self._set_roi_fields(
+                            x,
+                            y,
+                            w,
+                            h,
+                            update_live=False,
+                            selected=False,
+                            status=f"ROI: full frame {w} x {h}",
+                        ),
+                    )
+            except Exception as exc:
+                self._log_async(f"Could not clear Hera ROI immediately: {exc}")
+            finally:
+                self.parameter_apply_lock.release()
+                if live_was_running and self.controller and self.controller.connected:
+                    self._log_async("Restarting Hera live view after clearing ROI.")
+                    self._safe_after(0, self.start_live_view)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _read_int_var(self, var, name):
         try:
@@ -124,14 +191,30 @@ class ROIMixin:
         with self.live_frame_lock:
             frame_info = getattr(self, "live_frame_info", None)
             frame_size = getattr(self, "live_display_frame_size", None)
-        if frame_info:
-            frame_width, frame_height = frame_info[0], frame_info[1]
-            if frame_width > 0 and frame_height > 0:
-                return frame_width, frame_height
-        if frame_size:
-            frame_width, frame_height = frame_size
-            if frame_width > 0 and frame_height > 0:
-                return frame_width, frame_height
+        roi = self._normalize_roi_tuple(self.selected_export_roi or self.live_roi_rect)
+
+        def valid_size(size):
+            return size and len(size) >= 2 and int(size[0]) > 0 and int(size[1]) > 0
+
+        def contains_roi(size):
+            if not roi:
+                return True
+            frame_width, frame_height = int(size[0]), int(size[1])
+            left, top, width, height = roi
+            return left + width <= frame_width and top + height <= frame_height
+
+        candidates = (
+            getattr(self, "live_sensor_frame_size", None),
+            getattr(self, "roi_fields_frame_size", None),
+            frame_info,
+            frame_size,
+        )
+        for candidate in candidates:
+            if valid_size(candidate) and contains_roi(candidate):
+                return int(candidate[0]), int(candidate[1])
+        for candidate in (frame_info, frame_size, getattr(self, "live_sensor_frame_size", None)):
+            if valid_size(candidate):
+                return int(candidate[0]), int(candidate[1])
         return None
 
     def _clip_rect_to_size(self, left, top, width, height, frame_width, frame_height):

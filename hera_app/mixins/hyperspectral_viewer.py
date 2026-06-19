@@ -80,6 +80,53 @@ class HyperspectralViewerMixin:
         _handle, info, _mode, _normalize, _notice = self._get_hyper_display_context()
         return info
 
+    def _default_hyper_band_index_for_info(self, handle, info, target_wavelength=None):
+        try:
+            bands = int(info.get("bands", 0) or 0)
+        except Exception:
+            bands = 0
+        if not handle or not info or not self.controller or bands <= 0:
+            return 0
+
+        if target_wavelength is None:
+            target_wavelength = getattr(self, "default_hyper_wavelength_nm", 600.0)
+        try:
+            target_wavelength = float(target_wavelength)
+        except Exception:
+            target_wavelength = 600.0
+
+        best_index = 0
+        best_wavelength = None
+        best_distance = math.inf
+        try:
+            with self.hypercube_read_lock:
+                band_pointers = self._get_hyper_pointer_series_unlocked(handle, info)
+                for band_index, (wavelength, _values) in enumerate(band_pointers[:bands]):
+                    try:
+                        wavelength = float(wavelength)
+                    except Exception:
+                        continue
+                    distance = abs(wavelength - target_wavelength)
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_index = band_index
+                        best_wavelength = wavelength
+        except Exception as exc:
+            self._log_async(
+                f"Could not choose default hyperspectral band near {target_wavelength:g} nm: {exc}",
+                detail=True,
+            )
+            return 0
+
+        if best_wavelength is not None:
+            self._log_async(
+                "Default hyperspectral band set to "
+                f"{best_index + 1}/{bands} near {target_wavelength:g} nm "
+                f"(wavelength={best_wavelength:.3f} nm).",
+                detail=True,
+            )
+        return best_index
+
     def _hyper_band_cache_key(self, band_index, handle, info, normalize):
         return (
             self._handle_cache_key(handle),
@@ -107,9 +154,8 @@ class HyperspectralViewerMixin:
             max_band_index = max(info["bands"] - 1, 0)
             self.hyper_band_scale.config(to=max_band_index)
             self.current_hyper_band_index.set(min(max(int(self.current_hyper_band_index.get()), 0), max_band_index))
-        if hasattr(self, "save_pending_button") and not self.pending_save_context:
-            can_save_flatfield = self._hyper_display_mode() == "Flatfield" and bool(self.flatfield_hypercube_handle and self.flatfield_info)
-            self.save_pending_button.config(state="normal" if can_save_flatfield else "disabled")
+        if hasattr(self, "_refresh_export_controls_for_display_mode"):
+            self._refresh_export_controls_for_display_mode()
         self.render_current_hyper_band()
         if self.hyper_selected_pixel:
             self._start_hyper_selected_spectrum_load(self.hyper_selected_pixel)
