@@ -681,8 +681,13 @@ class HeraController:
         self.check_status(self.HeraAPI_GetHyperspectralDataIsHDR(data_handle, ctypes.byref(hdr)), "Get hyperspectral data HDR flag")
         return hdr.value
 
-    def get_hypercube(self, data_handle, data_type, bands_count, binning):
+    def get_hypercube(self, data_handle, data_type, bands_count, binning, progress_handler=None):
         hypercube_handle = ctypes.c_void_p()
+        progress_callback = None
+        progress_callback_arg = None
+        if progress_handler:
+            progress_callback = self.FloatCallbackType(lambda progress: progress_handler(float(progress)))
+            progress_callback_arg = ctypes.cast(progress_callback, ctypes.c_void_p)
         self.check_status(
             self.HeraAPI_GetHyperCubeEx(
                 self.device_handle,
@@ -691,7 +696,7 @@ class HeraController:
                 ctypes.c_int(data_type),
                 ctypes.c_uint(bands_count),
                 ctypes.c_int(binning),
-                None,
+                progress_callback_arg,
             ),
             "Compute hypercube",
         )

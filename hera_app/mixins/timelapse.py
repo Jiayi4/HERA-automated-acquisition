@@ -303,6 +303,8 @@ class TimelapseMixin:
             self.time_remaining_var.set("Time remaining: -")
 
     def _timelapse_site_z_target(self, position):
+        if not getattr(self, "z_motion_enabled", False):
+            return None, "Z disabled"
         try:
             target_z = float(position.z)
         except (TypeError, ValueError):
@@ -334,14 +336,14 @@ class TimelapseMixin:
         if self.timelapse_stop_event.is_set():
             raise TimelapseStopped("Timelapse stopped before acquisition.")
 
-        # Move Z after XY is settled. Skip if NIS Z bridge is not active.
+        # Z motion is disabled for now; only XY is moved before Hera acquisition.
         confirmed_z = None
         z_status = "no Z"
         target_z, z_status = self._timelapse_site_z_target(position)
         if target_z is not None:
             self._log_async(f"NIS Z: targeting {target_z:.3f} um for {position.name}...")
             confirmed_z, z_status = self._move_z_to_position(target_z)
-        elif z_status != "no Z":
+        elif z_status not in ("no Z", "Z disabled"):
             self._log_async(f"{z_status} for {position.name}; starting Hera acquisition without Z move.")
 
         if self.timelapse_stop_event.is_set():

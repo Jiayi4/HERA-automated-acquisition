@@ -36,7 +36,6 @@ class UIBuilderMixin:
         self._build_right_controls(right.content)
         self._apply_theme_recursive(shell)
         self._install_activation_shortcuts(shell)
-        self._install_auto_apply_traces()
 
     def _make_scroll_column(self, parent, width):
         outer = tk.Frame(parent, bg=self.theme["bg"])
@@ -173,7 +172,7 @@ class UIBuilderMixin:
             self.param_vars.get("bands"),
             self.param_vars.get("stabilization"),
         ):
-            return self.apply_parameters_async
+            return None
         if self._var_matches(
             var_name,
             self.param_vars.get("roi_x"),
@@ -379,7 +378,7 @@ class UIBuilderMixin:
         tk.Button(roi_actions, text="Clear", command=self.clear_live_roi_selection).pack(side="left")
         tk.Label(roi, textvariable=self.live_roi_status_var, fg=self.theme["muted"], wraplength=215, justify="left").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        xyz = tk.LabelFrame(stage_tab, text="XYZ Position", padx=6, pady=5)
+        xyz = tk.LabelFrame(stage_tab, text="XY Position", padx=6, pady=5)
         xyz.pack(fill="x", pady=(0, 6))
         xyz.grid_columnconfigure(0, weight=1)
         self.stage_status_var = tk.StringVar(value="Stage: not connected")
@@ -388,7 +387,6 @@ class UIBuilderMixin:
         tk.Label(xyz, textvariable=self.stage_status_var, font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w")
         self.current_x_label = tk.Label(xyz, text="X: -")
         self.current_y_label = tk.Label(xyz, text="Y: -")
-        self.current_z_label = tk.Label(xyz, textvariable=self.nis_z_current_z_var)
 
         position_panel = tk.Frame(xyz)
         position_panel.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -424,7 +422,8 @@ class UIBuilderMixin:
         scroll.pack(side="right", fill="y")
         self.positions_tree.bind("<<TreeviewSelect>>", self.on_position_selected)
 
-        self._build_nis_z_ui(stage_tab)
+        if getattr(self, "z_motion_enabled", False):
+            self._build_nis_z_ui(stage_tab)
 
     def _build_center_workspace(self, parent):
         spectral = tk.LabelFrame(parent, text="Control Bar", padx=4, pady=3)
@@ -463,12 +462,38 @@ class UIBuilderMixin:
                     padx=(0, 4),
                     pady=0,
                 )
+        tk.Button(
+            spectral,
+            text="Set",
+            command=self.apply_parameters_async,
+            font=compact_font,
+            padx=6,
+            pady=0,
+        ).grid(row=0, column=10, sticky="ew", padx=(2, 0), pady=0)
         flatfield_bar = tk.Frame(spectral)
         flatfield_bar.grid(row=1, column=0, columnspan=12, sticky="ew", pady=(3, 0))
         tk.Label(flatfield_bar, text="Flatfield", font=("Segoe UI Semibold", 8)).pack(side="left", padx=(0, 4))
         tk.Label(flatfield_bar, textvariable=self.flatfield_status_var, font=compact_font, width=23, anchor="w").pack(side="left", padx=(0, 3))
-        tk.Button(flatfield_bar, text="Acquire", command=self.start_flatfield_acquisition, font=compact_font, padx=4, pady=0).pack(side="left", padx=(0, 2))
-        tk.Button(flatfield_bar, text="Clear", command=self.clear_flatfield, font=compact_font, padx=4, pady=0).pack(side="left", padx=(0, 4))
+        self.flatfield_acquire_button = tk.Button(
+            flatfield_bar,
+            text="Acquire",
+            command=self.start_flatfield_acquisition,
+            font=compact_font,
+            padx=4,
+            pady=0,
+        )
+        self.flatfield_acquire_button.pack(side="left", padx=(0, 2))
+        self.flatfield_use_current_button = tk.Button(
+            flatfield_bar,
+            text="Use Current",
+            command=self.use_current_sample_as_flatfield,
+            font=compact_font,
+            padx=4,
+            pady=0,
+        )
+        self.flatfield_use_current_button.pack(side="left", padx=(0, 2))
+        self.flatfield_clear_button = tk.Button(flatfield_bar, text="Clear", command=self.clear_flatfield, font=compact_font, padx=4, pady=0)
+        self.flatfield_clear_button.pack(side="left", padx=(0, 4))
 
         self._build_views_and_log(parent)
 
@@ -626,7 +651,9 @@ class UIBuilderMixin:
         acquisition = tk.LabelFrame(parent, text="Acquisition / Timelapse", padx=6, pady=5)
         acquisition.pack(fill="x", pady=(0, 6))
         tk.Button(acquisition, text="Run Selected Site", command=self.manual_trigger_selected_position).pack(fill="x", pady=2)
-        tk.Button(acquisition, text="Start Acquisition", command=self.start_acquisition).pack(fill="x", pady=2)
+        start_button = tk.Button(acquisition, text="Start Acquisition", command=self.start_acquisition)
+        start_button.pack(fill="x", pady=2)
+        self.start_acquisition_buttons.append(start_button)
         tk.Button(acquisition, text="Abort Hera Acquisition", command=self.abort_acquisition).pack(fill="x", pady=2)
         run_status = tk.LabelFrame(acquisition, text="Run Status", padx=5, pady=4)
         run_status.pack(fill="x", pady=(5, 0))
@@ -750,6 +777,27 @@ class UIBuilderMixin:
         can_export = bool(selected_export_possible)
         save_button.config(text="Export", state="normal" if can_export else "disabled")
 
+    def _refresh_run_action_controls(self):
+        reason = None
+        if hasattr(self, "_acquisition_busy_reason"):
+            reason = self._acquisition_busy_reason(include_sdk=False, include_parameter_apply=False)
+        state = "disabled" if reason else "normal"
+        for button in getattr(self, "start_acquisition_buttons", []):
+            try:
+                button.config(state=state)
+            except Exception:
+                pass
+        for button in (
+            getattr(self, "flatfield_acquire_button", None),
+            getattr(self, "flatfield_use_current_button", None),
+            getattr(self, "flatfield_clear_button", None),
+        ):
+            if button:
+                try:
+                    button.config(state=state)
+                except Exception:
+                    pass
+
     def _build_hera_ui(self, parent):
         frame = tk.LabelFrame(parent, text="Hera Acquisition", padx=8, pady=8)
         frame.pack(fill="x", pady=(0, 10))
@@ -811,7 +859,9 @@ class UIBuilderMixin:
 
         actions = tk.Frame(params)
         actions.grid(row=row, column=0, columnspan=3, pady=8, sticky="w")
-        tk.Button(actions, text="Start Acquisition", command=self.start_acquisition).pack(side="left", padx=(0, 6))
+        start_button = tk.Button(actions, text="Start Acquisition", command=self.start_acquisition)
+        start_button.pack(side="left", padx=(0, 6))
+        self.start_acquisition_buttons.append(start_button)
         tk.Button(actions, text="Abort Hera Acquisition", command=self.abort_acquisition).pack(side="left", padx=6)
 
     def _build_tango_ui(self, parent):
@@ -849,7 +899,6 @@ class UIBuilderMixin:
 
         self.current_x_label = tk.Label(frame, text="X: -")
         self.current_y_label = tk.Label(frame, text="Y: -")
-        self.current_z_label = tk.Label(frame, textvariable=self.nis_z_current_z_var)
 
         tl = tk.LabelFrame(frame, text="Timelapse Settings", padx=8, pady=8)
         tl.grid(row=8, column=0, sticky="ew", pady=(10, 0))

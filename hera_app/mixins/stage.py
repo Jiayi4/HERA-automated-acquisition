@@ -28,8 +28,7 @@ class StageMixin:
             try:
                 x, y, _, _ = self.tango.get_position()
                 self.latest_stage_xy = (x, y)
-                z_text = self.nis_z_current_z_var.get() if hasattr(self, "nis_z_current_z_var") else "Z: -"
-                self.stage_position_var.set(f"X: {x:.3f}, Y: {y:.3f}, {z_text}")
+                self.stage_position_var.set(f"X: {x:.3f}, Y: {y:.3f}")
                 self.current_x_label.config(text=f"X: {x:.3f}")
                 self.current_y_label.config(text=f"Y: {y:.3f}")
                 self._update_live_cursor_readout()
@@ -55,8 +54,7 @@ class StageMixin:
                         if self.is_closing:
                             return
                         self.latest_stage_xy = (x, y)
-                        z_text = self.nis_z_current_z_var.get() if hasattr(self, "nis_z_current_z_var") else "Z: -"
-                        self.stage_position_var.set(f"X: {x:.3f}, Y: {y:.3f}, {z_text}")
+                        self.stage_position_var.set(f"X: {x:.3f}, Y: {y:.3f}")
                         self.current_x_label.config(text=f"X: {x:.3f}")
                         self.current_y_label.config(text=f"Y: {y:.3f}")
                         self._update_live_cursor_readout()
@@ -79,10 +77,14 @@ class StageMixin:
         return f"{float(z):.3f}"
 
     def _current_cached_z(self):
+        if not getattr(self, "z_motion_enabled", False):
+            return math.nan
         return self.nis_z_last_value if self.nis_z_last_value is not None else math.nan
 
     def _get_current_z_or_nan(self):
         """Read NIS Z synchronously for position saving; return NaN if unavailable."""
+        if not getattr(self, "z_motion_enabled", False):
+            return math.nan
         try:
             with self.nis_z_request_lock:
                 z = self._get_nis_z_controller().get_z(timeout_sec=int(self.nis_z_timeout_var.get()))
@@ -91,6 +93,9 @@ class StageMixin:
         except Exception as exc:
             self.log(f"Could not read NIS Z while saving position: {exc}")
             return math.nan
+
+    def _z_disabled_log_text(self, name):
+        return f"Saved dummy Z={self.dummy_z_position:.3f} for {name} because Z control is disabled."
 
     def _get_position_save_z(self):
         """Use cached NIS Z if available; otherwise use a dummy Z so XY saving still works."""
@@ -143,7 +148,7 @@ class StageMixin:
                 f"Z={self._format_saved_z(z) or '-'}, ROI={self._format_roi_short(roi)}."
             )
             if used_dummy_z:
-                self.log(f"Used dummy Z={z:.3f} for {name} because NIS Z is not available yet.")
+                self.log(self._z_disabled_log_text(name))
         except Exception as exc:
             self.log(f"Failed to add position: {exc}")
             self.update_state("Error")
@@ -224,7 +229,7 @@ class StageMixin:
             self.selected_z_var.set(self._format_saved_z(z))
             self.log(f"Loaded current stage position into editor: X={x:.3f}, Y={y:.3f}, Z={self._format_saved_z(z) or '-'}")
             if used_dummy_z:
-                self.log(f"Used dummy Z={z:.3f} in the position editor because NIS Z is not available yet.")
+                self.log("Saved dummy Z in the position editor because Z control is disabled.")
         except Exception as exc:
             self.log(f"Failed to capture current stage position: {exc}")
             self.update_state("Error")
@@ -285,7 +290,7 @@ class StageMixin:
                 f"Z={self._format_saved_z(position.z) or '-'}, ROI={self._format_roi_short(position.roi)}."
             )
             if used_dummy_z:
-                self.log(f"Used dummy Z={position.z:.3f} for {position.name} because NIS Z is not available yet.")
+                self.log(self._z_disabled_log_text(position.name))
         except Exception as exc:
             self.log(f"Failed to update selected position: {exc}")
             self.update_state("Error")
@@ -324,6 +329,12 @@ class StageMixin:
             self.log(f"Failed to go to selected position: {exc}")
             self.update_state("Error")
             return
+        if getattr(self, "stage_motion_inflight", False):
+            self.log("Go to selected position ignored because stage motion is still in progress.")
+            return
+
+        self.stage_motion_inflight = True
+        self._refresh_run_action_controls()
 
         def worker():
             try:
@@ -338,17 +349,13 @@ class StageMixin:
                     self.tango.move_absolute_xy(position.x, position.y)
                     self.tango.wait_for_xy_stop(60000)
                     self._safe_after(0, self.update_stage_position_display)
-                try:
-                    target_z = float(position.z)
-                    if not math.isnan(target_z):
-                        self._log_async(f"NIS Z: targeting {target_z:.3f} um for {position.name}...")
-                        self._move_z_to_position(target_z)
-                except (TypeError, ValueError):
-                    pass
                 self._log_async(f"Reached {position.name}.")
             except Exception as exc:
                 self._log_async(f"Failed to go to selected position: {exc}")
                 self._safe_after(0, lambda: self.update_state("Error"))
+            finally:
+                self.stage_motion_inflight = False
+                self._safe_after(0, self._refresh_run_action_controls)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -358,6 +365,10 @@ class StageMixin:
         except Exception as exc:
             self.log(f"Manual site run failed: {exc}")
             self.update_state("Error")
+            return
+        busy_reason = self._acquisition_busy_reason()
+        if busy_reason:
+            self.log(f"Run selected site ignored because {busy_reason}.")
             return
         if not self._validate_auto_save_export_options():
             return
@@ -376,6 +387,8 @@ class StageMixin:
     def _move_z_to_position(self, target_z):
         """Move NIS Z to target_z via GET_Z then MOVE_REL. Blocks until confirmed.
         Returns (confirmed_z, status_str). Always called from a worker thread."""
+        if not getattr(self, "z_motion_enabled", False):
+            return None, "Z control disabled"
         with self.nis_z_request_lock:
             timeout = int(self.nis_z_timeout_var.get())
             tolerance = float(self.nis_z_tolerance_var.get())

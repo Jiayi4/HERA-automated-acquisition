@@ -127,6 +127,10 @@ class HeraTriggerApp(
         self.timelapse_pause_event = threading.Event()
         self.timelapse_run_id = 0
         self.timelapse_roi = None
+        self.acquisition_inflight = False
+        self.stage_motion_inflight = False
+        self.acquisition_watchdog_token = 0
+        self.acquisition_heartbeat_token = 0
         self.acquisition_done_event = threading.Event()
         self.acquisition_success = False
         self.last_export_path = ""
@@ -225,6 +229,8 @@ class HeraTriggerApp(
         self.acquisition_requested_hdr = False
         self.acquisition_pre_start_hdr = None
         self.acquisition_start_perf_time = None
+        self.last_acquisition_progress_time = None
+        self.last_acquisition_heartbeat_log_sec = 0
         self.hdr_pixel_format_diagnostics_enabled = False
         self.live_max_preview_width = 480
         self.live_display_rotation_degrees = 90
@@ -237,6 +243,7 @@ class HeraTriggerApp(
         self.hyper_photo = None
         self.current_hypercube_handle = None
         self.current_hypercube_info = None
+        self.current_hypercube_data = None
         self.current_hyper_band_cache = {}
         self.current_hyper_spectrum_cache = {}
         self.current_hyper_pointer_cache = {}
@@ -257,7 +264,10 @@ class HeraTriggerApp(
         self.hyper_display_rect = None
         self.flatfield_hypercube_handle = None
         self.flatfield_info = None
+        self.flatfield_hypercube_data = None
+        self.owned_cube_cache_max_bytes = 900 * 1024 * 1024
         self.flatfield_status_var = tk.StringVar(value="none")
+        self.flatfield_keep_sample_var = tk.BooleanVar(value=False)
         self.flatfield_output_path_var = tk.StringVar(value=self.default_output_dir)
         self.flatfield_name_var = tk.StringVar(value="flatfield")
         self.flatfield_append_time_var = tk.BooleanVar(value=True)
@@ -267,9 +277,14 @@ class HeraTriggerApp(
         self.export_flatfield_var = tk.BooleanVar(value=False)
         self.export_normalized_var = tk.BooleanVar(value=False)
         self.pending_acquisition_role = "sample"
+        self.promote_next_sample_to_flatfield = False
         self.pending_save_context = None
         self.pending_acquisition_auto_save = True
         self.save_pending_button = None
+        self.flatfield_acquire_button = None
+        self.flatfield_use_current_button = None
+        self.flatfield_clear_button = None
+        self.start_acquisition_buttons = []
         self.current_hyper_band_index = tk.IntVar(value=0)
         self.hyper_band_jump_var = tk.StringVar(value="1")
         self.current_hyper_wavelength_var = tk.StringVar(value="Wavelength: -")
@@ -281,6 +296,10 @@ class HeraTriggerApp(
         self.nis_z_timeout_var = tk.IntVar(value=90)
         self.nis_z_step_var = tk.StringVar(value="1.0")
         self.nis_z_tolerance_var = tk.DoubleVar(value=0.5)
+        self.z_motion_enabled = False
+        if not self.z_motion_enabled:
+            self.nis_z_current_z_var.set("Z: disabled")
+            self.nis_z_status_var.set("Z motion: disabled")
         self.nis_z_last_value = None
         self.nis_z_last_status = "not checked"
         self.nis_z_poll_job = None
@@ -295,7 +314,8 @@ class HeraTriggerApp(
         self._start_ui_call_queue_pump()
         self.start_stage_polling()
         self._safe_after(250, self.auto_connect_devices)
-        self._safe_after(5000, self.start_nis_z_polling)
+        if self.z_motion_enabled:
+            self._safe_after(5000, self.start_nis_z_polling)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _live_cursor_status_text(self, text):
@@ -310,6 +330,8 @@ class HeraTriggerApp(
             self.app_state_label.config(fg="red" if state_key == "Error" else "green")
         if hasattr(self, "right_app_state_label"):
             self.right_app_state_label.config(fg="red" if state_key == "Error" else "#7ad97a")
+        if hasattr(self, "_refresh_run_action_controls"):
+            self._refresh_run_action_controls()
 
     def _log_timestamp(self):
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -684,7 +706,10 @@ class HeraTriggerApp(
             if self.controller:
                 if self.current_hypercube_handle:
                     try:
-                        if self.current_hypercube_handle != self.flatfield_hypercube_handle:
+                        if (
+                            self.current_hypercube_handle != self.flatfield_hypercube_handle
+                            and not self._is_owned_cube_info(self.current_hypercube_info)
+                        ):
                             with self.hypercube_read_lock:
                                 self.controller.release_hypercube(self.current_hypercube_handle)
                     except Exception:
@@ -692,11 +717,14 @@ class HeraTriggerApp(
                     self.current_hypercube_handle = None
                 if self.flatfield_hypercube_handle:
                     try:
-                        with self.hypercube_read_lock:
-                            self.controller.release_hypercube(self.flatfield_hypercube_handle)
+                        if not self._is_owned_cube_info(self.flatfield_info):
+                            with self.hypercube_read_lock:
+                                self.controller.release_hypercube(self.flatfield_hypercube_handle)
                     except Exception:
                         pass
                     self.flatfield_hypercube_handle = None
+                self.current_hypercube_data = None
+                self.flatfield_hypercube_data = None
                 if self.controller.connected:
                     try:
                         if self.controller.is_acquiring():

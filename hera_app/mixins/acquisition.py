@@ -49,6 +49,7 @@ class AcquisitionMixin:
             progress_value = float(progress)
         except Exception:
             return
+        self.last_acquisition_progress_time = time.perf_counter()
         fraction = progress_value / 100.0 if progress_value > 1.0 else progress_value
         pct = max(0, min(100, int(round(fraction * 100.0))))
         self._set_run_progress(f"Acquiring: {pct}%", pct, mode="determinate")
@@ -62,6 +63,108 @@ class AcquisitionMixin:
 
     def _fail_run_progress(self, text="Progress: error"):
         self._set_run_progress(text, 0, mode="determinate")
+
+    def _acquisition_busy_reason(self, include_sdk=True, include_parameter_apply=True):
+        busy_states = {
+            self.STATE_LABELS["WaitingForTrigger"],
+            self.STATE_LABELS["Acquiring"],
+            self.STATE_LABELS["ComputingHypercube"],
+            self.STATE_LABELS["Saving"],
+            self.STATE_LABELS["RunningTimelapse"],
+        }
+        if getattr(self, "acquisition_inflight", False):
+            return "an acquisition is already running"
+        if getattr(self, "stage_motion_inflight", False):
+            return "stage motion is still in progress"
+        if getattr(self, "app_state", None) in busy_states:
+            return f"the app is {self.app_state}"
+        start_lock = getattr(self, "acquisition_start_lock", None)
+        if start_lock and start_lock.locked():
+            return "an acquisition start is already in progress"
+        processing_lock = getattr(self, "processing_lock", None)
+        if processing_lock and processing_lock.locked():
+            return "the previous acquisition is still being processed"
+        parameter_lock = getattr(self, "parameter_apply_lock", None)
+        if include_parameter_apply and parameter_lock and parameter_lock.locked():
+            return "camera parameters are still being applied"
+        if include_sdk and self.controller and self.controller.connected:
+            try:
+                if self.controller.is_acquiring():
+                    return "the Hera SDK reports an acquisition in progress"
+            except Exception as exc:
+                self.log(f"Could not verify Hera acquisition state before starting: {exc}", detail=True)
+        return None
+
+    def _set_acquisition_inflight(self, active):
+        self.acquisition_inflight = bool(active)
+        if not active:
+            self.acquisition_heartbeat_token += 1
+        self._safe_after(0, self._refresh_run_action_controls)
+
+    def _schedule_acquisition_heartbeat(self, acquisition_role):
+        self.acquisition_heartbeat_token += 1
+        token = self.acquisition_heartbeat_token
+        self.last_acquisition_heartbeat_log_sec = 0
+        self._safe_after(
+            10000,
+            lambda token=token, role=acquisition_role: self._acquisition_heartbeat_notice(token, role),
+        )
+
+    def _acquisition_heartbeat_notice(self, token, acquisition_role):
+        if token != getattr(self, "acquisition_heartbeat_token", None):
+            return
+        if not getattr(self, "acquisition_inflight", False):
+            return
+        start_time = getattr(self, "acquisition_start_perf_time", None)
+        if start_time is None:
+            return
+        elapsed = max(0, int(round(time.perf_counter() - start_time)))
+        label = "Flatfield" if acquisition_role == "flatfield" else "Acquisition"
+        last_progress_time = getattr(self, "last_acquisition_progress_time", None)
+        progress_is_recent = last_progress_time is not None and (time.perf_counter() - last_progress_time) < 8
+        if not progress_is_recent:
+            self._set_run_progress(
+                f"{label}: waiting for Hera SDK callback ({elapsed} s elapsed)",
+                mode="indeterminate",
+            )
+        log_bucket = (elapsed // 30) * 30
+        if log_bucket >= 30 and log_bucket != getattr(self, "last_acquisition_heartbeat_log_sec", 0):
+            self.last_acquisition_heartbeat_log_sec = log_bucket
+            self.log(f"{label} is still running; waiting for Hera SDK callback ({elapsed} s elapsed).")
+        self._safe_after(
+            10000,
+            lambda token=token, role=acquisition_role: self._acquisition_heartbeat_notice(token, role),
+        )
+
+    def _schedule_acquisition_watchdog(self, acquisition_role):
+        self.acquisition_watchdog_token += 1
+        token = self.acquisition_watchdog_token
+        delay_ms = 300000
+        self._safe_after(
+            delay_ms,
+            lambda token=token, role=acquisition_role, delay_ms=delay_ms: self._acquisition_watchdog_notice(
+                token,
+                role,
+                delay_ms,
+            ),
+        )
+
+    def _cancel_acquisition_watchdog(self):
+        self.acquisition_watchdog_token += 1
+
+    def _acquisition_watchdog_notice(self, token, acquisition_role, delay_ms):
+        if token != getattr(self, "acquisition_watchdog_token", None):
+            return
+        if not getattr(self, "acquisition_inflight", False):
+            return
+        label = "Flatfield" if acquisition_role == "flatfield" else "Hyperspectral"
+        seconds = delay_ms // 1000
+        self.log(
+            f"{label} acquisition is still waiting for a Hera SDK callback after {seconds} s. "
+            "If progress has stopped, press Abort Hera Acquisition before trying again."
+        )
+        if acquisition_role == "flatfield":
+            self._start_busy_progress("Acquiring flatfield: waiting for SDK callback...")
 
     def _set_var_if_changed(self, var, value):
         try:
@@ -194,7 +297,7 @@ class AcquisitionMixin:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def apply_parameters(self, restart_live=True, apply_roi=False, hdr_enabled=None):
+    def apply_parameters(self, restart_live=True, apply_roi=False, hdr_enabled=None, reset_roi_before_set=False):
         try:
             settings = self._read_hera_parameter_settings()
         except Exception as exc:
@@ -202,6 +305,7 @@ class AcquisitionMixin:
             self.update_state("Error")
             return False
         settings["apply_roi"] = bool(apply_roi)
+        settings["reset_roi_before_set"] = bool(reset_roi_before_set)
         if apply_roi:
             active_roi = self._get_active_roi()
             if active_roi:
@@ -303,6 +407,14 @@ class AcquisitionMixin:
                     self._log_async(f"ROI writability before SetROI: {roi_writable}")
                 except Exception as exc:
                     self._log_async(f"ROI writability check failed before SetROI: {exc}")
+                if settings.get("reset_roi_before_set"):
+                    try:
+                        self.controller.clear_roi()
+                        time.sleep(0.2)
+                        reset_roi = self._normalize_roi_tuple(self.controller.get_roi())
+                        self._log_async(f"Reset Hera ROI before SetROI. Current ROI after reset: {reset_roi}")
+                    except Exception as exc:
+                        self._log_async(f"Could not reset Hera ROI before SetROI: {exc}")
                 try:
                     self.controller.set_roi(roi_x, roi_y, roi_w, roi_h)
                     actual_roi = self.controller.get_roi()
@@ -366,7 +478,8 @@ class AcquisitionMixin:
                 self._safe_after(0, lambda bands=bands: self._set_var_if_changed(self.param_vars["bands"], bands))
                 self._log_async(f"Using default bands for scan mode {scan_mode_name}: {bands}")
 
-            self._safe_after(0, lambda: self.update_state("Ready"))
+            if not getattr(self, "acquisition_inflight", False):
+                self._safe_after(0, lambda: self.update_state("Ready"))
             self._log_async("Acquisition parameters applied.")
             return True
         except Exception as exc:
@@ -396,14 +509,16 @@ class AcquisitionMixin:
             return
         if current_handle == self.flatfield_hypercube_handle:
             return
-        try:
-            with self.hypercube_read_lock:
-                self.controller.release_hypercube(current_handle)
-        except Exception as exc:
-            self.log(f"Could not release previous sample cube before starting a new sample: {exc}")
-            return
+        if not self._is_owned_cube_info(current_info):
+            try:
+                with self.hypercube_read_lock:
+                    self.controller.release_hypercube(current_handle)
+            except Exception as exc:
+                self.log(f"Could not release previous sample cube before starting a new sample: {exc}")
+                return
         self.current_hypercube_handle = None
         self.current_hypercube_info = None
+        self.current_hypercube_data = None
         self.current_hyper_band_cache = {}
         self.current_hyper_spectrum_cache = {}
         self.current_hyper_pointer_cache = {}
@@ -435,7 +550,14 @@ class AcquisitionMixin:
         )
         self.log("Released previous sample cube before starting a new sample acquisition to reduce memory usage.")
 
-    def _arm_and_start_acquisition(self, export_tag=None, acquisition_role="sample", forced_roi=None, auto_save=True):
+    def _arm_and_start_acquisition(
+        self,
+        export_tag=None,
+        acquisition_role="sample",
+        forced_roi=None,
+        auto_save=True,
+        use_camera_roi=True,
+    ):
         if not self.acquisition_start_lock.acquire(blocking=False):
             raise RuntimeError("An acquisition start is already in progress.")
         parameter_lock_acquired = False
@@ -446,13 +568,23 @@ class AcquisitionMixin:
             if not self.parameter_apply_lock.acquire(timeout=20.0):
                 raise RuntimeError("Timed out waiting for Hera parameter apply to finish.")
             parameter_lock_acquired = True
-            return self._arm_and_start_acquisition_locked(export_tag, acquisition_role, forced_roi, auto_save)
+            return self._arm_and_start_acquisition_locked(export_tag, acquisition_role, forced_roi, auto_save, use_camera_roi)
+        except Exception:
+            self._set_acquisition_inflight(False)
+            raise
         finally:
             if parameter_lock_acquired:
                 self.parameter_apply_lock.release()
             self.acquisition_start_lock.release()
 
-    def _arm_and_start_acquisition_locked(self, export_tag=None, acquisition_role="sample", forced_roi=None, auto_save=True):
+    def _arm_and_start_acquisition_locked(
+        self,
+        export_tag=None,
+        acquisition_role="sample",
+        forced_roi=None,
+        auto_save=True,
+        use_camera_roi=True,
+    ):
         if not self.controller or not self.controller.connected:
             raise RuntimeError("Connect to Hera before starting acquisition.")
         if not self.check_license_status(allow_cached=True):
@@ -462,6 +594,7 @@ class AcquisitionMixin:
         if self.processing_lock.locked():
             raise RuntimeError("The previous acquisition is still being processed.")
 
+        self._set_acquisition_inflight(True)
         arm_start_time = time.perf_counter()
         live_was_running = self.controller.is_live_capturing()
         self.resume_live_after_acquisition = live_was_running
@@ -471,26 +604,65 @@ class AcquisitionMixin:
         if forced_roi is not None:
             forced_roi = self._normalize_roi_tuple(forced_roi)
             self.acquisition_requested_roi = forced_roi
-            apply_roi = True
             roi_x, roi_y, roi_w, roi_h = forced_roi
             self.param_vars["roi_x"].set(roi_x)
             self.param_vars["roi_y"].set(roi_y)
             self.param_vars["roi_w"].set(roi_w)
             self.param_vars["roi_h"].set(roi_h)
             self._set_active_roi(forced_roi)
-            self.log(f"ROI for this acquisition: {self._format_roi(forced_roi)}.")
+            apply_roi = bool(use_camera_roi)
+            if acquisition_role == "flatfield":
+                if apply_roi:
+                    self.log(
+                        "Flatfield acquisition will use ROI-limited Hera capture; "
+                        f"ROI {self._format_roi(forced_roi)} will be computed as the flatfield reference."
+                    )
+                else:
+                    self.log(
+                        "Flatfield acquisition will use full-frame Hera capture; "
+                        f"selected ROI {self._format_roi(forced_roi)} is kept for display/export."
+                    )
+            else:
+                self.log(f"ROI for this acquisition: {self._format_roi(forced_roi)}.")
         else:
             self.acquisition_requested_roi = self._get_active_roi()
-            apply_roi = self.acquisition_requested_roi is not None
+            apply_roi = bool(self.acquisition_requested_roi is not None and use_camera_roi)
             if self.acquisition_requested_roi:
-                self.log(f"Selected ROI for exported cube: {self.acquisition_requested_roi}")
+                if acquisition_role == "flatfield":
+                    if apply_roi:
+                        self.log(
+                            "Flatfield acquisition will use ROI-limited Hera capture; "
+                            f"ROI {self.acquisition_requested_roi} will be computed as the flatfield reference."
+                        )
+                    else:
+                        self.log(
+                            "Flatfield acquisition will use full-frame Hera capture; "
+                            f"selected ROI {self.acquisition_requested_roi} is kept for display/export."
+                        )
+                else:
+                    self.log(f"Selected ROI for exported cube: {self.acquisition_requested_roi}")
             else:
-                self.log("No ROI selected for export; hyperspectral cube will use the full returned image.")
+                if acquisition_role == "flatfield":
+                    self.log("No ROI selected for flatfield; flatfield acquisition will use the full returned image.")
+                else:
+                    self.log("No ROI selected for export; hyperspectral cube will use the full returned image.")
         acquisition_hdr_enabled = bool(self.hdr_enabled_var.get())
         self.log(f"HDR mode for acquisition: {self.hdr_mode_text(acquisition_hdr_enabled)}.", detail=True)
+        trigger_mode_name = self.param_vars["trigger_mode"].get()
+        self.update_state("Acquiring" if trigger_mode_name == "Internal" else "WaitingForTrigger")
+        if acquisition_role == "flatfield":
+            self._start_busy_progress("Preparing flatfield acquisition...")
+        else:
+            self._start_busy_progress("Preparing acquisition...")
         self.log("Preparing Hera camera parameters before starting acquisition.")
         apply_start_time = time.perf_counter()
-        if not self.apply_parameters(restart_live=False, apply_roi=apply_roi, hdr_enabled=acquisition_hdr_enabled):
+        reset_roi_before_set = False
+        if not self.apply_parameters(
+            restart_live=False,
+            apply_roi=apply_roi,
+            hdr_enabled=acquisition_hdr_enabled,
+            reset_roi_before_set=reset_roi_before_set,
+        ):
             if live_was_running and self.controller and self.controller.connected:
                 self.start_live_view()
                 self.resume_live_after_acquisition = False
@@ -505,7 +677,6 @@ class AcquisitionMixin:
                 self.log(f"Could not read camera ROI after parameter apply: {exc}")
 
         scan_mode = self.SCAN_MODES[self.param_vars["scan_mode"].get()]
-        trigger_mode_name = self.param_vars["trigger_mode"].get()
         trigger_mode = self.TRIGGER_MODES[trigger_mode_name]
         averages = int(self.param_vars["averages"].get())
         stabilization = int(self.param_vars["stabilization"].get())
@@ -519,6 +690,8 @@ class AcquisitionMixin:
         self.pending_acquisition_role = acquisition_role
         self.pending_acquisition_auto_save = auto_save
         self.pending_save_context = None
+        self.last_acquisition_progress_time = None
+        self.last_acquisition_heartbeat_log_sec = 0
         if self.save_pending_button:
             self.save_pending_button.config(state="disabled")
 
@@ -569,9 +742,10 @@ class AcquisitionMixin:
         if trigger_mode_name == "Internal":
             if acquisition_role == "flatfield":
                 self.log("Sending software flatfield acquisition command through Hera SDK.")
+                self._start_busy_progress("Acquiring flatfield...")
             else:
                 self.log("Sending software acquisition command through Hera SDK.")
-            self._set_run_progress("Acquiring: 0%", 0, mode="determinate")
+                self._set_run_progress("Acquiring: 0%", 0, mode="determinate")
         else:
             self.log(f"Arming Hera SDK acquisition with trigger mode '{trigger_mode_name}'.")
             self._set_run_progress("Waiting for trigger...", 0, mode="determinate")
@@ -584,6 +758,10 @@ class AcquisitionMixin:
             stabilization,
         )
         self.update_state("Acquiring" if trigger_mode_name == "Internal" else "WaitingForTrigger")
+        self._schedule_acquisition_heartbeat(acquisition_role)
+        self._schedule_acquisition_watchdog(acquisition_role)
+        if acquisition_role == "flatfield":
+            self.log("Flatfield acquisition is running; waiting for Hera SDK callback.")
         arm_elapsed = time.perf_counter() - arm_start_time
         self.log(f"Hyperspectral acquisition started. Start preparation took {arm_elapsed:.2f} s.", detail=True)
 
@@ -614,6 +792,10 @@ class AcquisitionMixin:
 
     def start_acquisition(self):
         try:
+            busy_reason = self._acquisition_busy_reason()
+            if busy_reason:
+                self.log(f"Start acquisition ignored because {busy_reason}.")
+                return
             tag = self._sanitize_export_tag(f"manual_{time.strftime('%Y%m%d_%H%M%S')}")
             self._arm_and_start_acquisition(export_tag=tag, acquisition_role="sample", auto_save=False)
         except Exception as exc:
@@ -854,6 +1036,7 @@ class AcquisitionMixin:
             self.controller.abort_hyperspectral_acquisition()
             self.log("Abort request sent to Hera SDK.")
             self._fail_run_progress("Progress: acquisition aborted")
+            self._set_acquisition_inflight(False)
             self.update_state("Ready")
             self.acquisition_done_event.set()
             if self.resume_live_after_acquisition:
@@ -897,8 +1080,88 @@ class AcquisitionMixin:
     def on_hyperspectral_data_acquired(self, data_handle, data_status, message):
         self._safe_after(0, lambda: self._start_data_processing(data_handle, data_status, message))
 
+    def _copy_hypercube_to_owned_cache(self, hypercube_handle, info, role):
+        try:
+            import numpy as np
+        except Exception:
+            np = None
+
+        bands = int(info.get("bands") or 0)
+        width = int(info.get("source_width") or info.get("width") or 0)
+        height = int(info.get("source_height") or info.get("height") or 0)
+        data_type = int(info.get("data_type") if info.get("data_type") is not None else 0)
+        bytes_per_value = 4 if data_type == 0 else 8
+        if bands <= 0 or width <= 0 or height <= 0:
+            self._log_async(f"Cached {role} cube skipped because dimensions are invalid.")
+            return None, None, info
+
+        estimated_bytes = bands * width * height * bytes_per_value
+        max_bytes = int(getattr(self, "owned_cube_cache_max_bytes", 0) or 0)
+        if max_bytes > 0 and estimated_bytes > max_bytes:
+            self._log_async(
+                f"Cached {role} cube skipped: estimated size {estimated_bytes / (1024 ** 2):.1f} MB "
+                f"exceeds limit {max_bytes / (1024 ** 2):.1f} MB. Keeping SDK handle."
+            )
+            return None, None, info
+
+        if np is not None:
+            dtype = np.float32 if data_type == 0 else np.float64
+            cube = np.empty((bands, height, width), dtype=dtype)
+            wavelengths = np.empty((bands,), dtype=np.float64)
+            storage_kind = "numpy"
+        else:
+            import array
+            import ctypes
+
+            cube = []
+            wavelengths = array.array("d")
+            array_typecode = "f" if data_type == 0 else "d"
+            c_value_type = ctypes.c_float if data_type == 0 else ctypes.c_double
+            storage_kind = "array"
+        self._log_async(
+            f"Caching {role} cube in app memory: {width} x {height} x {bands}, "
+            f"{estimated_bytes / (1024 ** 2):.1f} MB ({storage_kind})."
+        )
+        with self.hypercube_read_lock:
+            for band_index in range(bands):
+                wavelength, values = self.controller.get_hypercube_band_pointer(
+                    hypercube_handle,
+                    band_index,
+                    data_type,
+                )
+                if np is not None:
+                    band_array = np.ctypeslib.as_array(values, shape=(height, width))
+                    cube[band_index, :, :] = band_array
+                    wavelengths[band_index] = float(wavelength)
+                else:
+                    band_values = array.array(array_typecode)
+                    byte_count = width * height * bytes_per_value
+                    band_values.frombytes(ctypes.string_at(ctypes.addressof(values.contents), byte_count))
+                    cube.append(band_values)
+                    wavelengths.append(float(wavelength))
+                if band_index == 0 or (band_index + 1) % 25 == 0 or band_index + 1 == bands:
+                    pct = int(round((band_index + 1) * 100 / bands))
+                    self._set_run_progress(f"Caching {role} cube: {pct}%", pct, mode="determinate")
+
+        owned_handle = f"owned:{role}:{time.time():.6f}"
+        owned_info = dict(info)
+        owned_info["storage"] = "owned"
+        owned_info["owned_data_role"] = role
+        owned_info["owned_bytes"] = int(estimated_bytes)
+        owned_data = {
+            "array": cube if storage_kind == "numpy" else None,
+            "bands": cube if storage_kind == "array" else None,
+            "wavelengths": wavelengths,
+            "storage_kind": storage_kind,
+            "width": width,
+            "height": height,
+        }
+        return owned_handle, owned_data, owned_info
+
     def _start_data_processing(self, data_handle, data_status, message):
         self.log(f'Acquisition callback received: status={data_status}, message="{message}"')
+        self._cancel_acquisition_watchdog()
+        self.acquisition_heartbeat_token += 1
         acquisition_start_time = getattr(self, "acquisition_start_perf_time", None)
         if acquisition_start_time is not None:
             acquisition_elapsed = time.perf_counter() - acquisition_start_time
@@ -907,6 +1170,7 @@ class AcquisitionMixin:
             self.last_acquisition_error = message or "Hyperspectral acquisition failed or was aborted."
             self.acquisition_success = False
             self.acquisition_done_event.set()
+            self._set_acquisition_inflight(False)
             self.log(self.last_acquisition_error)
             self._fail_run_progress("Progress: acquisition failed")
             self.update_state("Error")
@@ -916,6 +1180,7 @@ class AcquisitionMixin:
             self.last_acquisition_error = "Processing is already running for a previous acquisition."
             self.acquisition_success = False
             self.acquisition_done_event.set()
+            self._set_acquisition_inflight(False)
             self.log(self.last_acquisition_error)
             self._fail_run_progress("Progress: processing busy")
             return
@@ -967,7 +1232,27 @@ class AcquisitionMixin:
 
             raw_info_elapsed = time.perf_counter() - raw_info_start_time
             hypercube_compute_start_time = time.perf_counter()
-            hypercube_handle = self.controller.get_hypercube(data_handle, data_type, bands, binning)
+            last_hypercube_progress_pct = {"value": -1}
+
+            def hypercube_progress(progress):
+                try:
+                    progress_value = float(progress)
+                except Exception:
+                    return
+                fraction = progress_value / 100.0 if progress_value > 1.0 else progress_value
+                pct = max(0, min(100, int(round(fraction * 100.0))))
+                if pct == last_hypercube_progress_pct["value"]:
+                    return
+                last_hypercube_progress_pct["value"] = pct
+                self._set_run_progress(f"Computing hypercube: {pct}%", pct, mode="determinate")
+
+            hypercube_handle = self.controller.get_hypercube(
+                data_handle,
+                data_type,
+                bands,
+                binning,
+                progress_handler=hypercube_progress,
+            )
             cube_width, cube_height, cube_bands, cube_type = self.controller.get_hypercube_info(hypercube_handle)
             cube_is_hdr = None
             try:
@@ -1042,9 +1327,31 @@ class AcquisitionMixin:
                 "is_hdr": cube_is_hdr,
                 "role": self.pending_acquisition_role,
             }
-            if not keep_previous_sample:
-                self.current_hypercube_handle = hypercube_handle
-                self.current_hypercube_info = new_cube_info
+            stored_handle = hypercube_handle
+            stored_info = new_cube_info
+            stored_data = None
+            owned_role = "flatfield" if self.pending_acquisition_role == "flatfield" else "sample"
+            owned_handle, owned_data, owned_info = self._copy_hypercube_to_owned_cache(
+                hypercube_handle,
+                new_cube_info,
+                owned_role,
+            )
+            if owned_handle and owned_data is not None:
+                stored_handle = owned_handle
+                stored_info = owned_info
+                stored_data = owned_data
+                try:
+                    with self.hypercube_read_lock:
+                        self.controller.release_hypercube(hypercube_handle)
+                    hypercube_handle = None
+                    self._log_async(f"Released SDK {owned_role} hypercube after caching it in app memory.")
+                except Exception as exc:
+                    self._log_async(f"Could not release SDK {owned_role} hypercube after caching: {exc}")
+
+            if self.pending_acquisition_role != "flatfield":
+                self.current_hypercube_handle = stored_handle
+                self.current_hypercube_info = stored_info
+                self.current_hypercube_data = stored_data
             self.current_hyper_band_cache = {}
             self.current_hyper_spectrum_cache = {}
             self.current_hyper_pointer_cache = {}
@@ -1063,15 +1370,20 @@ class AcquisitionMixin:
             self.hyper_spectrum_error = ""
             released_as_flatfield = False
             if self.pending_acquisition_role == "flatfield":
-                if self.flatfield_hypercube_handle and self.flatfield_hypercube_handle != hypercube_handle:
+                if (
+                    self.flatfield_hypercube_handle
+                    and self.flatfield_hypercube_handle != stored_handle
+                    and not self._is_owned_cube_info(self.flatfield_info)
+                ):
                     try:
                         with self.hypercube_read_lock:
                             self.controller.release_hypercube(self.flatfield_hypercube_handle)
                         released_as_flatfield = (self.flatfield_hypercube_handle == previous_handle)
                     except Exception:
                         pass
-                self.flatfield_hypercube_handle = hypercube_handle
-                self.flatfield_info = dict(new_cube_info)
+                self.flatfield_hypercube_handle = stored_handle
+                self.flatfield_info = dict(stored_info)
+                self.flatfield_hypercube_data = stored_data
                 self._set_var_async(self.flatfield_status_var, f"ready ({display_width} x {display_height}, bands={cube_bands})")
                 if keep_previous_sample:
                     self.current_hypercube_handle = previous_handle
@@ -1103,12 +1415,11 @@ class AcquisitionMixin:
                             self.hyper_band_scale.config(to=max(sample_bands - 1, 0)),
                             self.current_hyper_band_index.set(default_band),
                             self.render_current_hyper_band(),
-                            self._start_hyper_pointer_cache_warmup(),
                         ),
                     )
                     self._log_async("Flatfield cube is ready; kept the current sample for Raw/Normalized viewing.")
                 else:
-                    default_band = self._default_hyper_band_index_for_info(hypercube_handle, new_cube_info)
+                    default_band = self._default_hyper_band_index_for_info(stored_handle, stored_info)
                     self._safe_after(
                         0,
                         lambda default_band=default_band: (
@@ -1121,19 +1432,18 @@ class AcquisitionMixin:
                     )
                     self._log_async("Flatfield cube is ready; deferred preview rendering to avoid a full-frame memory spike.")
             else:
-                default_band = self._default_hyper_band_index_for_info(hypercube_handle, new_cube_info)
+                default_band = self._default_hyper_band_index_for_info(stored_handle, stored_info)
                 self._safe_after(
                     0,
                     lambda default_band=default_band: (
                         self.hyper_band_scale.config(to=max(cube_bands - 1, 0)),
                         self.current_hyper_band_index.set(default_band),
                         self.render_current_hyper_band(),
-                        self._start_hyper_pointer_cache_warmup(),
                     ),
                 )
                 self._log_async("Hyperspectral viewer is ready. Open the Hyperspectral View tab and move the band slider.")
             if previous_handle and not released_as_flatfield and not keep_previous_sample:
-                if previous_handle != self.flatfield_hypercube_handle:
+                if previous_handle != self.flatfield_hypercube_handle and not self._is_owned_cube_info(previous_info):
                     try:
                         with self.hypercube_read_lock:
                             self.controller.release_hypercube(previous_handle)
@@ -1148,7 +1458,7 @@ class AcquisitionMixin:
 
             if not self.pending_acquisition_auto_save and self.pending_acquisition_role == "flatfield":
                 self.pending_save_context = {
-                    "hypercube_handle": hypercube_handle,
+                    "hypercube_handle": stored_handle,
                     "export_tag": self.pending_export_tag or self._sanitize_export_tag(time.strftime("flatfield_%Y%m%d_%H%M%S")),
                     "requested_roi": self.acquisition_requested_roi,
                     "export_roi": export_roi,
@@ -1174,9 +1484,44 @@ class AcquisitionMixin:
                 self._safe_after(0, lambda: self.update_state("Completed"))
                 return
 
+            promote_sample_to_flatfield = bool(getattr(self, "promote_next_sample_to_flatfield", False))
+            if promote_sample_to_flatfield:
+                self.promote_next_sample_to_flatfield = False
+                self.flatfield_hypercube_handle = stored_handle
+                self.flatfield_info = dict(self.current_hypercube_info)
+                self.flatfield_info["role"] = "flatfield"
+                if self._is_owned_cube_info(self.current_hypercube_info):
+                    self.flatfield_info["owned_data_role"] = "flatfield"
+                    self.flatfield_hypercube_data = self.current_hypercube_data
+                self._set_var_async(self.flatfield_status_var, f"ready ({display_width} x {display_height}, bands={cube_bands})")
+                self.pending_save_context = {
+                    "hypercube_handle": stored_handle,
+                    "export_tag": self.pending_export_tag or self._sanitize_export_tag(time.strftime("flatfield_%Y%m%d_%H%M%S")),
+                    "requested_roi": self.acquisition_requested_roi,
+                    "export_roi": export_roi,
+                    "cube_width": cube_width,
+                    "cube_height": cube_height,
+                    "cube_hdr_text": cube_hdr_text,
+                    "cube_is_hdr": cube_is_hdr,
+                    "info": dict(self.flatfield_info),
+                    "role": "flatfield",
+                }
+                self.acquisition_success = True
+                self.last_acquisition_error = ""
+                if self.save_pending_button:
+                    self._safe_after(0, self._refresh_export_controls_for_display_mode)
+                self._set_var_async(self.hyper_display_mode_var, "Flatfield")
+                self._log_async(
+                    "Flatfield acquired through the sample-safe SDK path and kept in memory. "
+                    "Press Export to save it as _ref."
+                )
+                self._finish_run_progress("Progress: flatfield ready")
+                self._safe_after(0, lambda: self.update_state("Completed"))
+                return
+
             if not self.pending_acquisition_auto_save and self.pending_acquisition_role == "sample":
                 self.pending_save_context = {
-                    "hypercube_handle": hypercube_handle,
+                    "hypercube_handle": stored_handle,
                     "export_tag": self.pending_export_tag or self._sanitize_export_tag(time.strftime("hera_hypercube_%Y%m%d_%H%M%S")),
                     "requested_roi": self.acquisition_requested_roi,
                     "export_roi": export_roi,
@@ -1204,7 +1549,7 @@ class AcquisitionMixin:
             description = self._build_acquisition_description(cube_hdr_text, cube_is_hdr, role=self.pending_acquisition_role)
             if self.pending_acquisition_role == "flatfield":
                 hdr_path, saved_paths, measurement_dir = self._export_flatfield_reference_set(
-                    hypercube_handle,
+                    stored_handle,
                     export_tag,
                     output_dir,
                     description,
@@ -1212,7 +1557,7 @@ class AcquisitionMixin:
                 )
             else:
                 hdr_path, saved_paths, measurement_dir = self._export_measurement_set(
-                    hypercube_handle,
+                    stored_handle,
                     export_tag,
                     output_dir,
                     description,
@@ -1277,6 +1622,7 @@ class AcquisitionMixin:
                 self.controller.release_hyperspectral_data(data_handle)
             self.acquisition_start_perf_time = None
             self.acquisition_done_event.set()
+            self._set_acquisition_inflight(False)
             self.processing_lock.release()
             if self.resume_live_after_acquisition:
                 self.resume_live_after_acquisition = False

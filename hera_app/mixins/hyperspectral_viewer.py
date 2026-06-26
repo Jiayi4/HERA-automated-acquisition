@@ -4,7 +4,7 @@ import threading
 
 class HyperspectralViewerMixin:
     def _clear_hypercube_viewer(self):
-        if self.current_hypercube_handle and self.controller:
+        if self.current_hypercube_handle and self.controller and not self._is_owned_cube_info(self.current_hypercube_info):
             if self.current_hypercube_handle != self.flatfield_hypercube_handle:
                 try:
                     with self.hypercube_read_lock:
@@ -13,6 +13,7 @@ class HyperspectralViewerMixin:
                     pass
         self.current_hypercube_handle = None
         self.current_hypercube_info = None
+        self.current_hypercube_data = None
         self.current_hyper_band_cache = {}
         self.current_hyper_spectrum_cache = {}
         self.current_hyper_pointer_cache = {}
@@ -57,11 +58,11 @@ class HyperspectralViewerMixin:
     def _get_hyper_display_context(self):
         mode = self._hyper_display_mode()
         if mode == "Flatfield":
-            if self.flatfield_hypercube_handle and self.flatfield_info:
+            if self.flatfield_info and self._cube_source_available(self.flatfield_hypercube_handle, self.flatfield_info):
                 return self.flatfield_hypercube_handle, self.flatfield_info, mode, False, ""
             return None, None, mode, False, "No flatfield loaded"
 
-        if self.current_hypercube_handle and self.current_hypercube_info:
+        if self.current_hypercube_info and self._cube_source_available(self.current_hypercube_handle, self.current_hypercube_info):
             normalize = (
                 mode == "Normalized"
                 and self.current_hypercube_info.get("role") != "flatfield"
@@ -72,7 +73,7 @@ class HyperspectralViewerMixin:
                 notice = "Normalized view needs a matching flatfield; showing raw."
             return self.current_hypercube_handle, self.current_hypercube_info, mode, normalize, notice
 
-        if self.flatfield_hypercube_handle and self.flatfield_info:
+        if self.flatfield_info and self._cube_source_available(self.flatfield_hypercube_handle, self.flatfield_info):
             return self.flatfield_hypercube_handle, self.flatfield_info, "Flatfield", False, ""
         return None, None, mode, False, "No hypercube loaded"
 
@@ -85,7 +86,7 @@ class HyperspectralViewerMixin:
             bands = int(info.get("bands", 0) or 0)
         except Exception:
             bands = 0
-        if not handle or not info or not self.controller or bands <= 0:
+        if not info or bands <= 0:
             return 0
 
         if target_wavelength is None:
@@ -94,6 +95,36 @@ class HyperspectralViewerMixin:
             target_wavelength = float(target_wavelength)
         except Exception:
             target_wavelength = 600.0
+
+        if self._is_owned_cube_info(info):
+            owned_data = self._owned_cube_data_for_info(info)
+            wavelengths = owned_data.get("wavelengths") if owned_data else None
+            if wavelengths is None or len(wavelengths) <= 0:
+                return 0
+            best_index = 0
+            best_wavelength = None
+            best_distance = math.inf
+            for band_index, wavelength in enumerate(wavelengths[:bands]):
+                try:
+                    wavelength = float(wavelength)
+                except Exception:
+                    continue
+                distance = abs(wavelength - target_wavelength)
+                if distance < best_distance:
+                    best_distance = distance
+                    best_index = band_index
+                    best_wavelength = wavelength
+            if best_wavelength is not None:
+                self._log_async(
+                    "Default hyperspectral band set to "
+                    f"{best_index + 1}/{bands} near {target_wavelength:g} nm "
+                    f"(wavelength={best_wavelength:.3f} nm).",
+                    detail=True,
+                )
+            return best_index
+
+        if not handle or not self.controller:
+            return 0
 
         best_index = 0
         best_wavelength = None
@@ -128,8 +159,10 @@ class HyperspectralViewerMixin:
         return best_index
 
     def _hyper_band_cache_key(self, band_index, handle, info, normalize):
+        flat_info = self._flatfield_info_for_sample(info) if normalize else None
         return (
             self._handle_cache_key(handle),
+            self._handle_cache_key(self.flatfield_hypercube_handle) if normalize else None,
             int(band_index),
             self._hyper_display_mode(),
             bool(normalize),
@@ -138,6 +171,10 @@ class HyperspectralViewerMixin:
             info.get("width"),
             info.get("height"),
             info.get("display_roi"),
+            info.get("camera_roi"),
+            flat_info.get("source_width") if flat_info else None,
+            flat_info.get("source_height") if flat_info else None,
+            flat_info.get("display_roi") if flat_info else None,
             info.get("bands"),
             info.get("data_type"),
         )
@@ -211,31 +248,28 @@ class HyperspectralViewerMixin:
     def _get_hyper_band_values_for_display(self, band_index, handle=None, info=None, normalize=False):
         handle = handle or self.current_hypercube_handle
         info = info or self.current_hypercube_info
-        source_width = info.get("source_width", info["width"])
-        source_height = info.get("source_height", info["height"])
         display_roi = info.get("display_roi")
-        with self.hypercube_read_lock:
-            wavelength, band_values = self.controller.get_hypercube_band_data(
-                handle,
+        wavelength, band_values, source_width, _source_height = self._get_cube_band_flat_values(handle, info, band_index)
+        if normalize:
+            alignment = self._flatfield_alignment_for_sample(info)
+            if not alignment:
+                raise RuntimeError("Normalized view needs a compatible flatfield.")
+            sample_roi = alignment["sample_roi"]
+            flatfield_roi = alignment["flatfield_roi"]
+            _, flat_values, flat_source_width, _flat_source_height = self._get_cube_band_flat_values(
+                self.flatfield_hypercube_handle,
+                self.flatfield_info,
                 band_index,
-                source_width,
-                source_height,
-                info["data_type"],
             )
-            band_values = self._crop_hyper_band_values_for_display(band_values, source_width, display_roi)
-            if normalize:
-                _, flat_values = self.controller.get_hypercube_band_data(
-                    self.flatfield_hypercube_handle,
-                    band_index,
-                    source_width,
-                    source_height,
-                    info["data_type"],
-                )
-                flat_values = self._crop_hyper_band_values_for_display(flat_values, source_width, display_roi)
-                band_values = [
-                    float(sample) / float(flat) if abs(float(flat)) > 1e-12 else 0.0
-                    for sample, flat in zip(band_values, flat_values)
-                ]
+            band_values = self._crop_flat_band_values(band_values, source_width, sample_roi)
+            flat_values = self._crop_flat_band_values(flat_values, flat_source_width, flatfield_roi)
+            return wavelength, [
+                float(sample) / float(flat) if abs(float(flat)) > 1e-12 else 0.0
+                for sample, flat in zip(band_values, flat_values)
+            ]
+
+        if display_roi:
+            band_values = self._crop_flat_band_values(band_values, source_width, display_roi)
         return wavelength, band_values
 
     def _event_to_hyper_image_xy(self, event):
@@ -289,6 +323,117 @@ class HyperspectralViewerMixin:
     def _handle_cache_key(self, handle):
         return getattr(handle, "value", None) or str(handle)
 
+    def _is_owned_cube_info(self, info):
+        return bool(info and info.get("storage") == "owned")
+
+    def _owned_cube_data_for_info(self, info):
+        if not self._is_owned_cube_info(info):
+            return None
+        role = info.get("owned_data_role")
+        if role == "flatfield":
+            return getattr(self, "flatfield_hypercube_data", None)
+        return getattr(self, "current_hypercube_data", None)
+
+    def _cube_source_available(self, handle, info):
+        if self._is_owned_cube_info(info):
+            owned_data = self._owned_cube_data_for_info(info)
+            return bool(owned_data and (owned_data.get("array") is not None or owned_data.get("bands") is not None))
+        return bool(handle and self.controller)
+
+    def _crop_hyper_band_array(self, band_array, roi):
+        if not roi:
+            return band_array
+        roi_x, roi_y, roi_w, roi_h = roi
+        return band_array[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+
+    def _crop_flat_band_values(self, values, source_width, roi):
+        if not roi:
+            return values
+        roi_x, roi_y, roi_w, roi_h = roi
+        cropped = []
+        for row in range(roi_y, roi_y + roi_h):
+            start = row * source_width + roi_x
+            cropped.extend(values[start:start + roi_w])
+        return cropped
+
+    def _get_cube_band_flat_values(self, handle, info, band_index):
+        if self._is_owned_cube_info(info):
+            owned_data = self._owned_cube_data_for_info(info)
+            if not owned_data:
+                raise RuntimeError("Cached hypercube data is not available.")
+            wavelengths = owned_data.get("wavelengths")
+            wavelength = float(wavelengths[band_index]) if wavelengths is not None and len(wavelengths) > band_index else float(band_index)
+            width = int(owned_data.get("width") or info.get("source_width") or info["width"])
+            height = int(owned_data.get("height") or info.get("source_height") or info["height"])
+            if owned_data.get("storage_kind") == "numpy":
+                cube = owned_data.get("array")
+                if cube is None:
+                    raise RuntimeError("Cached NumPy hypercube data is not available.")
+                return wavelength, cube[band_index].ravel(), width, height
+            bands = owned_data.get("bands")
+            if bands is None:
+                raise RuntimeError("Cached array hypercube data is not available.")
+            return wavelength, bands[band_index], width, height
+
+        source_width = int(info.get("source_width", info["width"]))
+        source_height = int(info.get("source_height", info["height"]))
+        try:
+            import numpy as np
+        except Exception:
+            np = None
+        if np is not None:
+            with self.hypercube_read_lock:
+                wavelength, values = self.controller.get_hypercube_band_pointer(
+                    handle,
+                    band_index,
+                    info["data_type"],
+                )
+                band_array = np.ctypeslib.as_array(values, shape=(source_height, source_width))
+                return wavelength, band_array.ravel(), source_width, source_height
+        with self.hypercube_read_lock:
+            wavelength, values = self.controller.get_hypercube_band_data(
+                handle,
+                band_index,
+                source_width,
+                source_height,
+                info["data_type"],
+            )
+        return wavelength, values, source_width, source_height
+
+    def _get_cube_band_array(self, handle, info, band_index):
+        try:
+            import numpy as np
+        except Exception as exc:
+            raise RuntimeError(f"NumPy is required for 2D hypercube array access: {exc}") from exc
+        if self._is_owned_cube_info(info):
+            owned_data = self._owned_cube_data_for_info(info)
+            if not owned_data:
+                raise RuntimeError("Cached hypercube data is not available.")
+            wavelengths = owned_data.get("wavelengths")
+            wavelength = float(wavelengths[band_index]) if wavelengths is not None and len(wavelengths) > band_index else float(band_index)
+            if owned_data.get("storage_kind") == "numpy":
+                cube = owned_data.get("array")
+                if cube is None:
+                    raise RuntimeError("Cached NumPy hypercube data is not available.")
+                return wavelength, cube[band_index]
+            bands = owned_data.get("bands")
+            if bands is None:
+                raise RuntimeError("Cached array hypercube data is not available.")
+            width = int(owned_data.get("width") or info.get("source_width") or info["width"])
+            height = int(owned_data.get("height") or info.get("source_height") or info["height"])
+            return wavelength, np.asarray(bands[band_index]).reshape((height, width))
+
+        source_width = int(info.get("source_width", info["width"]))
+        source_height = int(info.get("source_height", info["height"]))
+        with self.hypercube_read_lock:
+            wavelength, values = self.controller.get_hypercube_band_pointer(
+                handle,
+                band_index,
+                info["data_type"],
+            )
+            band_array = np.ctypeslib.as_array(values, shape=(source_height, source_width))
+            return wavelength, band_array
+
     def _hyper_pointer_cache_key(self, handle, info):
         return (
             self._handle_cache_key(handle),
@@ -297,6 +442,8 @@ class HyperspectralViewerMixin:
         )
 
     def _get_hyper_pointer_series_unlocked(self, handle, info):
+        if self._is_owned_cube_info(info):
+            raise RuntimeError("Owned hypercube data does not use SDK band pointers.")
         cache_key = self._hyper_pointer_cache_key(handle, info)
         cached = self.current_hyper_pointer_cache.get(cache_key)
         bands = info["bands"]
@@ -312,7 +459,7 @@ class HyperspectralViewerMixin:
 
     def _start_hyper_pointer_cache_warmup(self):
         handle, info, _mode, normalize, _notice = self._get_hyper_display_context()
-        if not info or not handle or not self.controller:
+        if not info or not self._cube_source_available(handle, info) or self._is_owned_cube_info(info):
             return
         request_ids = getattr(self, "hyper_spectrum_request_ids", {"selected": 0, "cursor": 0, "warmup": 0})
         request_ids["warmup"] = request_ids.get("warmup", 0) + 1
@@ -365,32 +512,42 @@ class HyperspectralViewerMixin:
             info.get("width"),
             info.get("height"),
             info.get("display_roi"),
+            info.get("camera_roi"),
             info.get("bands"),
             info.get("data_type"),
         )
+        bands = info["bands"]
+        flat_info = self._flatfield_info_for_sample(info) if normalize else None
+        if normalize and not flat_info:
+            raise RuntimeError("Normalized spectrum needs a compatible flatfield.")
+        flat_cache_key = (
+            flat_info.get("source_width"),
+            flat_info.get("source_height"),
+            flat_info.get("display_roi"),
+            flat_info.get("camera_roi"),
+        ) if flat_info else None
+        cache_key = cache_key + (flat_cache_key,)
         if cache:
             cached = self.current_hyper_spectrum_cache.get(cache_key)
             if cached is not None:
                 return cached
 
         source_index = self._display_pixel_to_source_index(info, image_x, image_y)
-        bands = info["bands"]
-        flat_info = self._flatfield_info_for_sample(info) if normalize else None
-        if normalize and not flat_info:
-            raise RuntimeError("Normalized spectrum needs a compatible flatfield.")
         flat_index = self._display_pixel_to_source_index(flat_info, image_x, image_y) if flat_info else None
         spectrum = []
 
-        with self.hypercube_read_lock:
-            band_pointers = self._get_hyper_pointer_series_unlocked(handle, info)
-            flat_pointers = self._get_hyper_pointer_series_unlocked(self.flatfield_hypercube_handle, flat_info) if normalize else None
-            for band_index, (wavelength, values) in enumerate(band_pointers[:bands]):
-                value = float(values[source_index])
-                if normalize:
-                    _, flat_values = flat_pointers[band_index]
-                    flat = float(flat_values[flat_index])
-                    value = value / flat if abs(flat) > 1e-12 else 0.0
-                spectrum.append((float(wavelength), value))
+        for band_index in range(bands):
+            wavelength, band_values, _source_width, _source_height = self._get_cube_band_flat_values(handle, info, band_index)
+            value = float(band_values[source_index])
+            if normalize:
+                _, flat_values, _flat_source_width, _flat_source_height = self._get_cube_band_flat_values(
+                    self.flatfield_hypercube_handle,
+                    flat_info,
+                    band_index,
+                )
+                flat = float(flat_values[flat_index])
+                value = value / flat if abs(flat) > 1e-12 else 0.0
+            spectrum.append((float(wavelength), value))
 
         if cache:
             self.current_hyper_spectrum_cache[cache_key] = spectrum
@@ -398,7 +555,7 @@ class HyperspectralViewerMixin:
 
     def _start_hyper_cursor_spectrum_load(self, image_pos):
         handle, info, _mode, normalize, _notice = self._get_hyper_display_context()
-        if not info or not handle or not self.controller:
+        if not info or not self._cube_source_available(handle, info):
             return
         request_ids = getattr(self, "hyper_spectrum_request_ids", {"selected": 0, "cursor": 0, "warmup": 0})
         request_ids["cursor"] = request_ids.get("cursor", 0) + 1
@@ -411,7 +568,7 @@ class HyperspectralViewerMixin:
     def _launch_hyper_cursor_spectrum_worker(self):
         image_pos = self.hyper_cursor_pending_pixel
         handle, info, _mode, normalize, _notice = self._get_hyper_display_context()
-        if not image_pos or not info or not handle or not self.controller:
+        if not image_pos or not info or not self._cube_source_available(handle, info):
             self.hyper_cursor_spectrum_inflight = False
             return
         self.hyper_cursor_pending_pixel = None
@@ -448,7 +605,7 @@ class HyperspectralViewerMixin:
 
     def _start_hyper_selected_spectrum_load(self, image_pos):
         handle, info, mode, normalize, _notice = self._get_hyper_display_context()
-        if not info or not handle or not self.controller:
+        if not info or not self._cube_source_available(handle, info):
             return
         request_ids = getattr(self, "hyper_spectrum_request_ids", {"selected": 0, "cursor": 0, "warmup": 0})
         request_ids["selected"] = request_ids.get("selected", 0) + 1
@@ -629,7 +786,7 @@ class HyperspectralViewerMixin:
         if not hasattr(self, "hyper_view_canvas"):
             return
         handle, info, _mode, normalize, notice = self._get_hyper_display_context()
-        if not info or not handle or not self.controller:
+        if not info or not self._cube_source_available(handle, info):
             self._draw_hyperspectral_view_placeholder(notice)
             return
         try:
