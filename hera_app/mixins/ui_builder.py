@@ -13,8 +13,6 @@ class UIBuilderMixin:
         toolbar.pack(fill="x", pady=(0, 5))
         title = tk.Label(toolbar, text="Hyperspectral Scanning Acquisition APP", font=("Segoe UI Semibold", 14), bg=self.theme["bg"], fg=self.theme["title"])
         title.pack(side="left")
-        subtitle = tk.Label(toolbar, text="HERA site-guided scanning", font=("Segoe UI", 9), bg=self.theme["bg"], fg=self.theme["muted"])
-        subtitle.pack(side="left", padx=(8, 0), pady=(3, 0))
         tk.Button(toolbar, textvariable=self.theme_button_var, command=self.toggle_theme_mode).pack(side="right")
 
         body = tk.PanedWindow(shell, orient="horizontal", sashwidth=6, sashrelief="flat", bg=self.theme["bg"], bd=0)

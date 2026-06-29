@@ -1,0 +1,874 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scientific UI Preview - Hyperspectral Scanning Acquisition APP</title>
+  <style>
+    :root {
+      font-family: "Segoe UI", Inter, Arial, sans-serif;
+      --blue: #2f7df6;
+      --orange: #f28b2e;
+      --ok: #1c9b73;
+      --danger: #d64a4a;
+      --radius: 4px;
+      --gap: 10px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 22px;
+      background: #edf1f5;
+      color: #172033;
+    }
+
+    .intro {
+      max-width: 1500px;
+      margin: 0 auto 16px;
+    }
+
+    .intro h1 {
+      margin: 0 0 4px;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .intro p {
+      margin: 0;
+      color: #667085;
+      font-size: 13px;
+    }
+
+    .previews {
+      max-width: 1500px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .mock {
+      height: 900px;
+      display: grid;
+      grid-template-rows: 46px 42px 1fr 128px;
+      border: 1px solid var(--line);
+      background: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+      box-shadow: 0 14px 40px rgba(16, 24, 40, 0.14);
+    }
+
+    .design-a {
+      --bg: #10141b;
+      --top: #0c1016;
+      --surface: #151b24;
+      --surface-2: #111720;
+      --field: #0b0f15;
+      --line: #2a3342;
+      --line-soft: #202938;
+      --text: #eef2f7;
+      --muted: #94a3b8;
+      --muted-2: #64748b;
+      --canvas: #06080c;
+      --plot: #0d1219;
+      --header: #1b2430;
+    }
+
+    .design-b {
+      --bg: #f7f9fc;
+      --top: #ffffff;
+      --surface: #ffffff;
+      --surface-2: #f1f5f9;
+      --field: #ffffff;
+      --line: #cfd8e5;
+      --line-soft: #e2e8f0;
+      --text: #182230;
+      --muted: #667085;
+      --muted-2: #98a2b3;
+      --canvas: #f8fafc;
+      --plot: #ffffff;
+      --header: #edf2f7;
+    }
+
+    .titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      background: var(--top);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .titlebar h2 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .window-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 24px;
+      padding: 0 8px;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      border-radius: var(--radius);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .status-chip::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      background: var(--ok);
+      border-radius: 50%;
+    }
+
+    .controlbar {
+      display: grid;
+      grid-template-columns: 85px 102px 62px 64px 78px 110px 42px 1fr 56px 70px 48px;
+      gap: 6px;
+      align-items: center;
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--line-soft);
+      background: var(--surface);
+      min-width: 0;
+    }
+
+    .layout {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 246px minmax(0, 1fr) 250px;
+      background: var(--bg);
+    }
+
+    .left,
+    .right,
+    .center {
+      min-width: 0;
+      min-height: 0;
+    }
+
+    .left,
+    .right {
+      background: var(--surface);
+      border-right: 1px solid var(--line-soft);
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .right {
+      border-right: 0;
+      border-left: 1px solid var(--line-soft);
+    }
+
+    .center {
+      padding: 10px;
+      display: grid;
+      grid-template-rows: 31px 1fr 116px;
+      gap: 8px;
+    }
+
+    .module {
+      border-top: 1px solid var(--line-soft);
+      padding-top: 9px;
+    }
+
+    .module:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .module-title {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 7px;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+      min-width: 0;
+    }
+
+    .label {
+      width: 68px;
+      flex: none;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .value {
+      min-width: 0;
+      color: var(--text);
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    input,
+    select {
+      height: 26px;
+      border: 1px solid var(--line);
+      background: var(--field);
+      color: var(--text);
+      border-radius: 2px;
+      padding: 0 7px;
+      font-size: 12px;
+      min-width: 0;
+      outline: none;
+    }
+
+    input:focus,
+    select:focus {
+      border-color: var(--blue);
+    }
+
+    .fill {
+      flex: 1;
+      width: 100%;
+    }
+
+    .small {
+      width: 55px;
+      text-align: right;
+      flex: none;
+    }
+
+    button {
+      height: 26px;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      color: var(--text);
+      border-radius: 2px;
+      font-size: 12px;
+      padding: 0 8px;
+      white-space: nowrap;
+    }
+
+    button.primary {
+      background: var(--blue);
+      border-color: var(--blue);
+      color: #fff;
+    }
+
+    button.orange {
+      background: var(--orange);
+      border-color: var(--orange);
+      color: #171004;
+    }
+
+    button.plain {
+      background: transparent;
+    }
+
+    .checkline {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text);
+      font-size: 12px;
+    }
+
+    .checkline input {
+      width: 14px;
+      height: 14px;
+      padding: 0;
+      flex: none;
+      accent-color: var(--blue);
+    }
+
+    .button-row {
+      display: flex;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .button-stack {
+      display: grid;
+      gap: 7px;
+    }
+
+    .site-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      border: 1px solid var(--line-soft);
+    }
+
+    .site-table th,
+    .site-table td {
+      padding: 5px 6px;
+      border-bottom: 1px solid var(--line-soft);
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    .site-table th {
+      background: var(--header);
+      color: var(--muted);
+      font-weight: 650;
+    }
+
+    .site-table tr.selected td {
+      background: rgba(47, 125, 246, 0.14);
+      border-left: 2px solid var(--blue);
+    }
+
+    .tabs {
+      display: flex;
+      gap: 2px;
+      border-bottom: 1px solid var(--line-soft);
+      min-width: 0;
+    }
+
+    .tab {
+      height: 31px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 12px;
+      color: var(--muted);
+      border: 1px solid transparent;
+      border-bottom: 0;
+      font-size: 12px;
+    }
+
+    .tab.active {
+      color: var(--text);
+      background: var(--surface);
+      border-color: var(--line-soft);
+      border-top: 2px solid var(--blue);
+    }
+
+    .viewer {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 30px 1fr;
+      background: var(--surface);
+      border: 1px solid var(--line-soft);
+    }
+
+    .viewer-tools {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 6px;
+      border-bottom: 1px solid var(--line-soft);
+      overflow: hidden;
+    }
+
+    .tool-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .tool-check input {
+      width: 13px;
+      height: 13px;
+      accent-color: var(--blue);
+    }
+
+    .tool-label {
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .viewer-body {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 78px;
+      grid-template-rows: minmax(0, 1fr) 68px;
+      gap: 6px;
+      padding: 6px;
+    }
+
+    .image,
+    .profile,
+    .spectrum {
+      background: var(--canvas);
+      border: 1px solid var(--line-soft);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .image {
+      min-height: 0;
+    }
+
+    .sample {
+      position: absolute;
+      left: 16%;
+      top: 9%;
+      width: 68%;
+      height: 80%;
+      background:
+        radial-gradient(circle at 30% 30%, rgba(255,255,255,0.13) 0 9%, transparent 10%),
+        radial-gradient(circle at 54% 31%, rgba(255,255,255,0.12) 0 9%, transparent 10%),
+        radial-gradient(circle at 72% 58%, rgba(255,255,255,0.11) 0 10%, transparent 11%),
+        radial-gradient(circle at 38% 67%, rgba(255,255,255,0.11) 0 10%, transparent 11%),
+        repeating-linear-gradient(17deg, rgba(255,255,255,0.06) 0 1px, transparent 1px 4px);
+      opacity: 0.85;
+      clip-path: polygon(9% 0, 91% 0, 100% 12%, 100% 88%, 91% 100%, 9% 100%, 0 88%, 0 12%);
+    }
+
+    .roi {
+      position: absolute;
+      left: 26%;
+      top: 18%;
+      width: 48%;
+      height: 58%;
+      border: 1px solid var(--orange);
+      box-shadow: inset 0 0 0 1px rgba(242, 139, 46, 0.2);
+    }
+
+    .cross-v,
+    .cross-h {
+      position: absolute;
+      background: rgba(242, 139, 46, 0.75);
+    }
+
+    .cross-v {
+      left: 50%;
+      top: 0;
+      width: 1px;
+      height: 100%;
+    }
+
+    .cross-h {
+      left: 0;
+      top: 49%;
+      height: 1px;
+      width: 100%;
+    }
+
+    .profile.vertical {
+      grid-column: 2;
+      grid-row: 1;
+    }
+
+    .profile.horizontal {
+      grid-column: 1;
+      grid-row: 2;
+    }
+
+    .profile::before {
+      content: "";
+      position: absolute;
+      inset: 12px 8px 10px;
+      border-bottom: 1px solid rgba(242, 139, 46, 0.55);
+      background: linear-gradient(135deg, transparent 0 18%, rgba(242,139,46,0.82) 19%, transparent 20% 42%, rgba(242,139,46,0.82) 43%, transparent 44% 70%, rgba(242,139,46,0.82) 71%, transparent 72%);
+    }
+
+    .spectrum {
+      grid-column: 1 / -1;
+      height: 116px;
+      background: var(--plot);
+    }
+
+    .spectrum::before {
+      content: "";
+      position: absolute;
+      inset: 16px 20px 18px 24px;
+      border-left: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .spectrum::after {
+      content: "";
+      position: absolute;
+      left: 32px;
+      right: 28px;
+      top: 52%;
+      height: 2px;
+      background: linear-gradient(90deg, var(--blue), var(--orange));
+      transform: skewY(-4deg);
+    }
+
+    .run-status {
+      background: var(--surface);
+      border-top: 1px solid var(--line);
+      padding: 9px 11px;
+      display: grid;
+      grid-template-rows: 24px 5px 1fr;
+      gap: 7px;
+    }
+
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      min-width: 0;
+    }
+
+    .status-line strong {
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    .divider {
+      color: var(--line);
+    }
+
+    .progress {
+      height: 5px;
+      background: var(--surface-2);
+      border: 1px solid var(--line-soft);
+    }
+
+    .progress span {
+      display: block;
+      height: 100%;
+      width: 58%;
+      background: linear-gradient(90deg, var(--blue), var(--orange));
+    }
+
+    .log {
+      border: 1px solid var(--line-soft);
+      background: var(--field);
+      padding: 6px 8px;
+      color: var(--muted);
+      font: 11px/1.45 Consolas, "Cascadia Mono", monospace;
+      overflow: hidden;
+    }
+
+    .log div {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .variant-label {
+      position: absolute;
+      transform: translateY(-28px);
+      color: #667085;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .mock-shell {
+      position: relative;
+    }
+
+    @media (max-width: 1200px) {
+      .previews {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="intro">
+    <h1>Scientific modern UI directions</h1>
+    <p>Same input methods, fewer decorative cards, square controls, restrained neutral surfaces, blue/orange accents only.</p>
+  </div>
+
+  <main class="previews">
+    <div class="mock-shell">
+      <div class="variant-label">Design A / dark instrument console</div>
+      <section class="mock design-a">
+        <header class="titlebar">
+          <h2>Hyperspectral Scanning Acquisition APP</h2>
+          <div class="window-actions">
+            <span class="status-chip">Hera connected</span>
+            <span>Light Mode</span>
+          </div>
+        </header>
+
+        <div class="controlbar">
+          <select><option>Medium</option></select>
+          <select><option>Uniform lambda</option></select>
+          <input value="1300" />
+          <select><option>Avg 1</option></select>
+          <select><option>None</option></select>
+          <select><option>SinglePrecision</option></select>
+          <button>Set</button>
+          <span class="value">Flatfield ready: 825 x 869, bands=1300</span>
+          <button>Acquire</button>
+          <button>Import Ref</button>
+          <button>Clear</button>
+        </div>
+
+        <div class="layout">
+          <aside class="left">
+            <div class="module">
+              <div class="module-title">Status</div>
+              <div class="row"><span class="label">License</span><span class="value">Licensed</span></div>
+              <div class="row"><span class="label">Live</span><span class="value">Mono12, 12-bit</span></div>
+              <div class="row"><span class="label">Last export</span><span class="value">sample_A01_nrm</span></div>
+            </div>
+
+            <div class="module">
+              <div class="module-title">Parameters</div>
+              <div class="row"><span class="label">Gain</span><input class="fill" value="0.0" /></div>
+              <div class="row"><span class="label">Exposure</span><input class="fill" value="3.0" /></div>
+              <label class="checkline"><input type="checkbox" checked /> 16-bit HDR</label>
+            </div>
+
+            <div class="module">
+              <div class="module-title">ROI</div>
+              <div class="row"><span class="label">W</span><input class="small" value="825" /><span class="label">H</span><input class="small" value="869" /></div>
+              <div class="button-row"><button>Apply</button><button>Select ROI</button><button>Clear</button></div>
+              <div class="row"><span class="label">Area</span><span class="value">716925 px2</span></div>
+            </div>
+
+            <div class="module">
+              <div class="module-title">Stage</div>
+              <div class="row"><span class="label">Live XY</span><span class="value">12584.30, 8472.10</span></div>
+              <table class="site-table">
+                <thead><tr><th>Site</th><th>Name</th><th>ROI</th></tr></thead>
+                <tbody>
+                  <tr class="selected"><td>1</td><td>A01</td><td>yes</td></tr>
+                  <tr><td>2</td><td>A02</td><td>yes</td></tr>
+                  <tr><td>3</td><td>B01</td><td>-</td></tr>
+                </tbody>
+              </table>
+              <div class="button-row"><button>Add New Site</button><button>Go To</button></div>
+            </div>
+          </aside>
+
+          <section class="center">
+            <div class="tabs">
+              <span class="tab active">Live View</span>
+              <span class="tab">Hyperspectral View</span>
+            </div>
+            <div class="viewer">
+              <div class="viewer-tools">
+                <label class="tool-check"><input type="checkbox" checked /> Auto</label>
+                <label class="tool-check"><input type="checkbox" checked /> Sat</label>
+                <label class="tool-check"><input type="checkbox" /> Cross</label>
+                <span class="tool-label">Gamma 1.0</span>
+                <input class="small" value="" />
+                <button>Reset</button>
+                <button>Snap</button>
+                <span class="tool-label">Zoom 100%</span>
+                <button>-</button><button>Fit</button><button>+</button>
+              </div>
+              <div class="viewer-body">
+                <div class="image"><div class="sample"></div><div class="roi"></div><div class="cross-v"></div><div class="cross-h"></div></div>
+                <div class="profile vertical"></div>
+                <div class="profile horizontal"></div>
+              </div>
+            </div>
+            <div class="spectrum"></div>
+          </section>
+
+          <aside class="right">
+            <div class="module">
+              <div class="module-title">Acquisition</div>
+              <div class="button-stack">
+                <button class="primary">Start Single Acquisition</button>
+                <button>Abort Acquisition</button>
+              </div>
+            </div>
+            <div class="module">
+              <div class="module-title">Timelapse</div>
+              <div class="row"><span class="label">Interval</span><input class="fill" value="10.0" /></div>
+              <div class="row"><span class="label">Dwell</span><input class="fill" value="1.0" /></div>
+              <div class="row"><span class="label">Sites</span><input class="fill" value="1,3,5-8" /><button>All</button></div>
+              <div class="button-stack">
+                <button>Run One Loop</button>
+                <button class="orange">Run Timelapse</button>
+                <div class="button-row"><button>Pause</button><button>Stop</button></div>
+              </div>
+            </div>
+            <div class="module">
+              <div class="module-title">Export</div>
+              <div class="row"><span class="label">Name</span><input class="fill" value="sample_A" /></div>
+              <label class="checkline"><input type="checkbox" /> raw</label>
+              <label class="checkline"><input type="checkbox" /> ref</label>
+              <label class="checkline"><input type="checkbox" checked /> nrm</label>
+              <button class="primary">Export</button>
+            </div>
+          </aside>
+        </div>
+
+        <footer class="run-status">
+          <div class="status-line">
+            <span>Status: <strong>Acquiring</strong></span><span class="divider">|</span>
+            <span>Site: <strong>A01</strong></span><span class="divider">|</span>
+            <span>Cycle: <strong>4</strong></span><span class="divider">|</span>
+            <span>Next loop: <strong>08:42</strong></span>
+          </div>
+          <div class="progress"><span></span></div>
+          <div class="log">
+            <div>15:34:08  Cycle 4 started.</div>
+            <div>15:34:12  Site A01: helper acquisition running.</div>
+            <div>15:34:43  Export saved: sample_A01_cycle4_nrm.hdr</div>
+          </div>
+        </footer>
+      </section>
+    </div>
+
+    <div class="mock-shell">
+      <div class="variant-label">Design B / bright lab workstation</div>
+      <section class="mock design-b">
+        <header class="titlebar">
+          <h2>Hyperspectral Scanning Acquisition APP</h2>
+          <div class="window-actions">
+            <span class="status-chip">Hera connected</span>
+            <span>Dark Mode</span>
+          </div>
+        </header>
+
+        <div class="controlbar">
+          <select><option>Medium</option></select>
+          <select><option>Uniform lambda</option></select>
+          <input value="1300" />
+          <select><option>Avg 1</option></select>
+          <select><option>None</option></select>
+          <select><option>SinglePrecision</option></select>
+          <button>Set</button>
+          <span class="value">Flatfield ready: 825 x 869, bands=1300</span>
+          <button>Acquire</button>
+          <button>Import Ref</button>
+          <button>Clear</button>
+        </div>
+
+        <div class="layout">
+          <aside class="left">
+            <div class="module">
+              <div class="module-title">Status</div>
+              <div class="row"><span class="label">License</span><span class="value">Licensed</span></div>
+              <div class="row"><span class="label">Live</span><span class="value">Mono12, 12-bit</span></div>
+              <div class="row"><span class="label">Last export</span><span class="value">sample_A01_nrm</span></div>
+            </div>
+
+            <div class="module">
+              <div class="module-title">Parameters</div>
+              <div class="row"><span class="label">Gain</span><input class="fill" value="0.0" /></div>
+              <div class="row"><span class="label">Exposure</span><input class="fill" value="3.0" /></div>
+              <label class="checkline"><input type="checkbox" checked /> 16-bit HDR</label>
+            </div>
+
+            <div class="module">
+              <div class="module-title">ROI</div>
+              <div class="row"><span class="label">W</span><input class="small" value="825" /><span class="label">H</span><input class="small" value="869" /></div>
+              <div class="button-row"><button>Apply</button><button>Select ROI</button><button>Clear</button></div>
+              <div class="row"><span class="label">Area</span><span class="value">716925 px2</span></div>
+            </div>
+
+            <div class="module">
+              <div class="module-title">Stage</div>
+              <div class="row"><span class="label">Live XY</span><span class="value">12584.30, 8472.10</span></div>
+              <table class="site-table">
+                <thead><tr><th>Site</th><th>Name</th><th>ROI</th></tr></thead>
+                <tbody>
+                  <tr class="selected"><td>1</td><td>A01</td><td>yes</td></tr>
+                  <tr><td>2</td><td>A02</td><td>yes</td></tr>
+                  <tr><td>3</td><td>B01</td><td>-</td></tr>
+                </tbody>
+              </table>
+              <div class="button-row"><button>Add New Site</button><button>Go To</button></div>
+            </div>
+          </aside>
+
+          <section class="center">
+            <div class="tabs">
+              <span class="tab active">Live View</span>
+              <span class="tab">Hyperspectral View</span>
+            </div>
+            <div class="viewer">
+              <div class="viewer-tools">
+                <label class="tool-check"><input type="checkbox" checked /> Auto</label>
+                <label class="tool-check"><input type="checkbox" checked /> Sat</label>
+                <label class="tool-check"><input type="checkbox" /> Cross</label>
+                <span class="tool-label">Gamma 1.0</span>
+                <input class="small" value="" />
+                <button>Reset</button>
+                <button>Snap</button>
+                <span class="tool-label">Zoom 100%</span>
+                <button>-</button><button>Fit</button><button>+</button>
+              </div>
+              <div class="viewer-body">
+                <div class="image"><div class="sample"></div><div class="roi"></div><div class="cross-v"></div><div class="cross-h"></div></div>
+                <div class="profile vertical"></div>
+                <div class="profile horizontal"></div>
+              </div>
+            </div>
+            <div class="spectrum"></div>
+          </section>
+
+          <aside class="right">
+            <div class="module">
+              <div class="module-title">Acquisition</div>
+              <div class="button-stack">
+                <button class="primary">Start Single Acquisition</button>
+                <button>Abort Acquisition</button>
+              </div>
+            </div>
+            <div class="module">
+              <div class="module-title">Timelapse</div>
+              <div class="row"><span class="label">Interval</span><input class="fill" value="10.0" /></div>
+              <div class="row"><span class="label">Dwell</span><input class="fill" value="1.0" /></div>
+              <div class="row"><span class="label">Sites</span><input class="fill" value="1,3,5-8" /><button>All</button></div>
+              <div class="button-stack">
+                <button>Run One Loop</button>
+                <button class="orange">Run Timelapse</button>
+                <div class="button-row"><button>Pause</button><button>Stop</button></div>
+              </div>
+            </div>
+            <div class="module">
+              <div class="module-title">Export</div>
+              <div class="row"><span class="label">Name</span><input class="fill" value="sample_A" /></div>
+              <label class="checkline"><input type="checkbox" /> raw</label>
+              <label class="checkline"><input type="checkbox" /> ref</label>
+              <label class="checkline"><input type="checkbox" checked /> nrm</label>
+              <button class="primary">Export</button>
+            </div>
+          </aside>
+        </div>
+
+        <footer class="run-status">
+          <div class="status-line">
+            <span>Status: <strong>Acquiring</strong></span><span class="divider">|</span>
+            <span>Site: <strong>A01</strong></span><span class="divider">|</span>
+            <span>Cycle: <strong>4</strong></span><span class="divider">|</span>
+            <span>Next loop: <strong>08:42</strong></span>
+          </div>
+          <div class="progress"><span></span></div>
+          <div class="log">
+            <div>15:34:08  Cycle 4 started.</div>
+            <div>15:34:12  Site A01: helper acquisition running.</div>
+            <div>15:34:43  Export saved: sample_A01_cycle4_nrm.hdr</div>
+          </div>
+        </footer>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
