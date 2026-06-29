@@ -1,4 +1,6 @@
 import os
+import math
+import shutil
 import threading
 import time
 
@@ -389,6 +391,7 @@ class DeviceMixin:
         from tkinter import messagebox
         self.log("Running preflight checks...")
         errors = []
+        warnings = []
         if not os.path.exists(self.dll_path_var.get()):
             errors.append("Hera SDK DLL path does not exist.")
         hera_devices = HeraController.get_hera_devices_path()
@@ -406,6 +409,10 @@ class DeviceMixin:
                 os.makedirs(output_path, exist_ok=True)
             except Exception as exc:
                 errors.append(f"Cannot create output folder: {exc}")
+        if os.path.exists(output_path):
+            disk_error = self._preflight_check_output_disk_space(output_path, warnings)
+            if disk_error:
+                errors.append(disk_error)
 
         if self.controller and self.controller.connected:
             if self.license_ok_seen:
@@ -417,12 +424,153 @@ class DeviceMixin:
         if errors:
             for err in errors:
                 self.log(f"Preflight error: {err}")
+            for warning in warnings:
+                self.log(f"Preflight warning: {warning}")
             self.update_state("Error")
             messagebox.showwarning("Preflight failed", "\n".join(errors))
         else:
+            for warning in warnings:
+                self.log(f"Preflight warning: {warning}")
             self.log("Preflight passed.")
             if self.controller and self.controller.connected:
                 self.update_state("Ready")
+
+    def _format_bytes_for_log(self, byte_count):
+        try:
+            value = float(byte_count)
+        except Exception:
+            return "unknown"
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if value < 1024.0 or unit == "TB":
+                return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+            value /= 1024.0
+        return f"{value:.1f} TB"
+
+    def _preflight_full_frame_size(self):
+        sensor_size = getattr(self, "live_sensor_frame_size", None)
+        if sensor_size and len(sensor_size) >= 2 and sensor_size[0] > 0 and sensor_size[1] > 0:
+            return int(sensor_size[0]), int(sensor_size[1])
+        with self.live_frame_lock:
+            frame_info = getattr(self, "live_frame_info", None)
+        if frame_info:
+            try:
+                width, height, _bit_depth, _bits_per_pixel = self._live_frame_info_parts(frame_info)
+                if width > 0 and height > 0:
+                    return int(width), int(height)
+            except Exception:
+                pass
+        return 3200, 3200
+
+    def _preflight_band_count(self, warnings):
+        try:
+            bands = int(self.param_vars["bands"].get())
+        except Exception:
+            bands = 0
+        if bands > 0:
+            return bands
+
+        if self.controller and self.controller.connected:
+            try:
+                scan_mode = self.SCAN_MODES[self.param_vars["scan_mode"].get()]
+                bands = int(self.controller.get_default_output_bands(scan_mode))
+                if bands > 0:
+                    warnings.append(f"Bands is 0; disk preflight used SDK recommended bands={bands}.")
+                    return bands
+            except Exception as exc:
+                warnings.append(f"Could not read SDK recommended bands for disk preflight: {exc}")
+
+        fallback_bands = 1300
+        warnings.append(f"Bands is 0 and recommended bands could not be read; disk preflight assumed {fallback_bands} bands.")
+        return fallback_bands
+
+    def _preflight_export_product_count(self, warnings):
+        selected = [
+            self._bool_var_value("export_raw_var", False),
+            self._bool_var_value("export_flatfield_var", False),
+            self._bool_var_value("export_normalized_var", False),
+        ]
+        count = sum(1 for enabled in selected if enabled)
+        if count <= 0:
+            warnings.append("No Data to Export option is selected; disk preflight only checked that the output drive is reachable.")
+        return count
+
+    def _preflight_cycle_count(self, warnings):
+        try:
+            stop_after_min = float(self.stop_after_var.get())
+        except Exception:
+            stop_after_min = 0.0
+        try:
+            interval_min = float(self.interval_var.get())
+        except Exception:
+            interval_min = 0.0
+        if stop_after_min > 0 and interval_min > 0:
+            return max(1, int(math.ceil(stop_after_min / interval_min)))
+        warnings.append("Stop after is 0 or interval is invalid; disk preflight estimated one cycle only.")
+        return 1
+
+    def _preflight_site_pixel_counts(self):
+        full_width, full_height = self._preflight_full_frame_size()
+        full_pixels = max(1, int(full_width) * int(full_height))
+        fallback_roi = self._normalize_roi_tuple(self._get_active_roi())
+        positions = list(getattr(self, "positions", []) or [])
+        if not positions:
+            if fallback_roi:
+                _x, _y, width, height = fallback_roi
+                return [width * height], f"current ROI {width}x{height}"
+            return [full_pixels], f"full frame {full_width}x{full_height}"
+
+        pixel_counts = []
+        roi_sites = 0
+        for position in positions:
+            roi = self._get_position_roi(position) or fallback_roi
+            if roi:
+                _x, _y, width, height = roi
+                pixel_counts.append(width * height)
+                roi_sites += 1
+            else:
+                pixel_counts.append(full_pixels)
+        if roi_sites:
+            return pixel_counts, f"{len(positions)} site(s), ROI on {roi_sites}/{len(positions)}"
+        return pixel_counts, f"{len(positions)} site(s), full frame {full_width}x{full_height}"
+
+    def _preflight_estimated_output_bytes(self, warnings):
+        product_count = self._preflight_export_product_count(warnings)
+        if product_count <= 0:
+            return 0, "no exports selected"
+        bands = self._preflight_band_count(warnings)
+        data_type_name = self.param_vars["data_type"].get()
+        bytes_per_value = 8 if self.DATA_TYPES.get(data_type_name, 0) == 1 else 4
+        pixel_counts, scope = self._preflight_site_pixel_counts()
+        cycles = self._preflight_cycle_count(warnings)
+        raw_bytes = sum(pixel_counts) * bands * bytes_per_value * product_count * cycles
+        return int(raw_bytes), f"{scope}; cycles={cycles}; bands={bands}; products={product_count}; data={data_type_name}"
+
+    def _preflight_check_output_disk_space(self, output_path, warnings):
+        try:
+            usage = shutil.disk_usage(output_path)
+        except Exception as exc:
+            return f"Cannot read free disk space for output folder: {exc}"
+
+        estimated_bytes, estimate_scope = self._preflight_estimated_output_bytes(warnings)
+        if estimated_bytes <= 0:
+            self.log(f"Disk preflight: free={self._format_bytes_for_log(usage.free)}; {estimate_scope}.")
+            return None
+
+        required_bytes = int(estimated_bytes * 1.25)
+        self.log(
+            "Disk preflight: "
+            f"free={self._format_bytes_for_log(usage.free)}, "
+            f"estimated={self._format_bytes_for_log(estimated_bytes)}, "
+            f"required with buffer={self._format_bytes_for_log(required_bytes)} "
+            f"({estimate_scope})."
+        )
+        if usage.free < required_bytes:
+            return (
+                "Not enough free disk space for the current timelapse/export settings: "
+                f"free {self._format_bytes_for_log(usage.free)}, "
+                f"required {self._format_bytes_for_log(required_bytes)}."
+            )
+        return None
 
     def show_sdk_version(self):
         try:

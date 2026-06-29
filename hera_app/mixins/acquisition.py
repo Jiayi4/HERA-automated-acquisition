@@ -167,7 +167,7 @@ class AcquisitionMixin:
         seconds = delay_ms // 1000
         self.log(
             f"{label} acquisition is still waiting for a Hera SDK callback after {seconds} s. "
-            "If progress has stopped, press Abort Hera Acquisition before trying again."
+            "If progress has stopped, press Abort Acquisition before trying again."
         )
         if acquisition_role == "flatfield":
             self._start_busy_progress("Acquiring flatfield: waiting for SDK callback...")

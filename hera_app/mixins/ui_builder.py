@@ -11,9 +11,9 @@ class UIBuilderMixin:
 
         toolbar = tk.Frame(shell, bg=self.theme["bg"])
         toolbar.pack(fill="x", pady=(0, 5))
-        title = tk.Label(toolbar, text="HERA + Tango Trigger", font=("Segoe UI Semibold", 14), bg=self.theme["bg"], fg=self.theme["title"])
+        title = tk.Label(toolbar, text="Hyperspectral Scanning Acquisition APP", font=("Segoe UI Semibold", 14), bg=self.theme["bg"], fg=self.theme["title"])
         title.pack(side="left")
-        subtitle = tk.Label(toolbar, text="Stage-guided hyperspectral acquisition", font=("Segoe UI", 9), bg=self.theme["bg"], fg=self.theme["muted"])
+        subtitle = tk.Label(toolbar, text="HERA site-guided scanning", font=("Segoe UI", 9), bg=self.theme["bg"], fg=self.theme["muted"])
         subtitle.pack(side="left", padx=(8, 0), pady=(3, 0))
         tk.Button(toolbar, textvariable=self.theme_button_var, command=self.toggle_theme_mode).pack(side="right")
 
@@ -196,9 +196,7 @@ class UIBuilderMixin:
                 return None
             return self.apply_roi_from_corners
         if self._var_matches(var_name, self.roi_area_var):
-            if for_focusout:
-                return None
-            return self.apply_roi_from_area
+            return None
         if self._var_matches(var_name, self.position_name_var):
             if for_focusout:
                 return None
@@ -285,7 +283,7 @@ class UIBuilderMixin:
 
     def _build_left_controls(self, parent):
         self.param_vars = {}
-        self.stage_speed_var = tk.DoubleVar(value=20.0)
+        self.stage_speed_var = tk.DoubleVar(value=5.0)
         self.stage_dwell_var = tk.DoubleVar(value=1.0)
         self.live_pixel_size_var = tk.DoubleVar(value=1.0)
         self.live_invert_x_var = tk.BooleanVar(value=False)
@@ -340,7 +338,7 @@ class UIBuilderMixin:
         btns.pack(fill="x", pady=(6, 0))
         tk.Button(btns, text="Restart Live", command=self.restart_live_view).pack(fill="x")
 
-        exposure = tk.LabelFrame(camera_tab, text="Exposure", padx=6, pady=5)
+        exposure = tk.LabelFrame(camera_tab, text="Parameters", padx=6, pady=5)
         exposure.pack(fill="x", pady=(0, 6))
         exposure.grid_columnconfigure(1, weight=1)
         self._param_entry(exposure, 0, "Gain [dB]:", "gain", 0.0)
@@ -373,11 +371,15 @@ class UIBuilderMixin:
             tk.Entry(corners, textvariable=x_var, width=6).grid(row=corner_row, column=2, sticky="w")
             tk.Label(corners, text="Y").grid(row=corner_row, column=3, sticky="e", padx=(4, 1))
             tk.Entry(corners, textvariable=y_var, width=6).grid(row=corner_row, column=4, sticky="w")
-        area_row = tk.Frame(roi)
-        area_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
-        tk.Label(area_row, text="Area (px2)").pack(side="left")
-        tk.Entry(area_row, textvariable=self.roi_area_var, width=8).pack(side="left", padx=(4, 0))
-        tk.Button(area_row, text="Apply", command=self.apply_roi_from_area).pack(side="left", padx=(4, 0))
+        size_row = tk.Frame(roi)
+        size_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        for label, var in (
+            ("W", self.param_vars["roi_w"]),
+            ("H", self.param_vars["roi_h"]),
+        ):
+            tk.Label(size_row, text=label).pack(side="left", padx=(0, 1))
+            tk.Entry(size_row, textvariable=var, width=5).pack(side="left", padx=(0, 4))
+        tk.Button(size_row, text="Apply", command=self.apply_roi_from_size).pack(side="left", padx=(2, 0))
         roi_actions = tk.Frame(roi)
         roi_actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         tk.Button(roi_actions, text="Apply Box", command=self.apply_roi_from_corners).pack(side="left", padx=(0, 3))
@@ -397,30 +399,25 @@ class UIBuilderMixin:
         self.stage_status_var = tk.StringVar(value="Stage: not connected")
         self.stage_version_var = tk.StringVar(value="Controller: -")
         self.stage_position_var = tk.StringVar(value="X: -, Y: -")
-        tk.Label(xyz, textvariable=self.stage_status_var, font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w")
-        self.current_x_label = tk.Label(xyz, text="X: -")
-        self.current_y_label = tk.Label(xyz, text="Y: -")
+        stage_status_row = tk.Frame(xyz)
+        stage_status_row.grid(row=0, column=0, sticky="ew")
+        tk.Label(stage_status_row, textvariable=self.stage_status_var, font=("Segoe UI", 9, "bold")).pack(side="left", fill="x", expand=True)
+        tk.Button(stage_status_row, text="Reconnect", command=self.reconnect_stage).pack(side="right")
+        live_xy = tk.Frame(xyz)
+        live_xy.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        tk.Label(live_xy, text="Live XY:", fg=self.theme["muted"]).pack(side="left")
+        self.current_x_label = tk.Label(live_xy, text="X: -")
+        self.current_y_label = tk.Label(live_xy, text="Y: -")
+        self.current_x_label.pack(side="left", padx=(6, 4))
+        self.current_y_label.pack(side="left")
 
-        position_panel = tk.Frame(xyz)
-        position_panel.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        tk.Label(position_panel, text="Position name").pack(anchor="w")
-        tk.Entry(position_panel, textvariable=self.selected_name_var, width=20).pack(fill="x", pady=(1, 4))
-        for text, command in (
-            ("Add Current Position", self.add_current_position),
-            ("Update Selected Position", self.update_selected_position),
-            ("Delete Selected Row", self.delete_selected_position),
-            ("Rename Selected Position", self.rename_selected_position),
-            ("Go To Selected Position", self.goto_selected_position),
-            ("Reconnect Stage", self.reconnect_stage),
-        ):
-            tk.Button(position_panel, text=text, command=command).pack(fill="x", pady=1)
-
-        saved = tk.LabelFrame(stage_tab, text="Saved Positions", padx=6, pady=5)
-        saved.pack(fill="both", expand=True, pady=(0, 6))
+        saved = tk.LabelFrame(xyz, text="Saved Positions", padx=6, pady=5)
+        saved.grid(row=2, column=0, sticky="ew", pady=(6, 0))
         tree_wrap = tk.Frame(saved)
         tree_wrap.pack(fill="both", expand=True)
-        self.positions_tree = ttk.Treeview(tree_wrap, columns=("name", "x", "y", "z", "roi"), show="headings", height=7, style="Dark.Treeview")
+        self.positions_tree = ttk.Treeview(tree_wrap, columns=("site", "name", "x", "y", "z", "roi"), show="headings", height=7, style="Dark.Treeview", selectmode="extended")
         for name, label, width, anchor in (
+            ("site", "Site", 34, "center"),
             ("name", "Name", 74, "w"),
             ("x", "X", 46, "e"),
             ("y", "Y", 46, "e"),
@@ -434,6 +431,21 @@ class UIBuilderMixin:
         self.positions_tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         self.positions_tree.bind("<<TreeviewSelect>>", self.on_position_selected)
+        saved_actions = tk.Frame(saved)
+        saved_actions.pack(fill="x", pady=(4, 0))
+        tk.Button(saved_actions, text="\U0001F5D1", command=self.delete_selected_position, width=4).pack(side="left", padx=(0, 4))
+        tk.Button(saved_actions, text="Go To", command=self.goto_selected_position, width=8).pack(side="left")
+
+        position_panel = tk.Frame(xyz)
+        position_panel.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        tk.Label(position_panel, text="Position name").pack(anchor="w")
+        tk.Entry(position_panel, textvariable=self.selected_name_var, width=20).pack(fill="x", pady=(1, 4))
+        for text, command in (
+            ("Add New Site", self.add_current_position),
+            ("Update Selected Site", self.update_selected_position),
+            ("Rename Selected Site", self.rename_selected_position),
+        ):
+            tk.Button(position_panel, text=text, command=command).pack(fill="x", pady=1)
 
         if getattr(self, "z_motion_enabled", False):
             self._build_nis_z_ui(stage_tab)
@@ -499,15 +511,15 @@ class UIBuilderMixin:
             pady=0,
         )
         self.flatfield_acquire_button.pack(side="left", padx=(0, 2))
-        self.flatfield_use_current_button = tk.Button(
+        self.flatfield_import_button = tk.Button(
             flatfield_bar,
-            text="Use Current",
-            command=self.use_current_sample_as_flatfield,
+            text="Import Ref",
+            command=self.import_flatfield_reference,
             font=compact_font,
             padx=4,
             pady=0,
         )
-        self.flatfield_use_current_button.pack(side="left", padx=(0, 2))
+        self.flatfield_import_button.pack(side="left", padx=(0, 2))
         self.flatfield_clear_button = tk.Button(flatfield_bar, text="Clear", command=self.clear_flatfield, font=compact_font, padx=4, pady=0)
         self.flatfield_clear_button.pack(side="left", padx=(0, 4))
 
@@ -527,33 +539,34 @@ class UIBuilderMixin:
         notebook.add(hyper_tab, text="Hyperspectral View")
 
         live_controls = tk.Frame(live_tab, bg=self.theme["panel"])
-        live_controls.pack(fill="x", padx=6, pady=(6, 3))
+        live_controls.pack(fill="x", padx=4, pady=(3, 2))
         live_display_bar = tk.Frame(live_controls, bg=self.theme["panel"])
         live_display_bar.pack(fill="x")
-        tk.Checkbutton(live_display_bar, text="Autocontrast", variable=self.live_autocontrast_var,
+        compact_font = ("Segoe UI", 8)
+        tk.Checkbutton(live_display_bar, text="Auto", variable=self.live_autocontrast_var,
                        command=lambda: self._schedule_live_render(force=True),
                        bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
-                       activebackground=self.theme["panel"]).pack(side="left", padx=(8, 0))
-        tk.Checkbutton(live_display_bar, text="Show Saturation", variable=self.live_show_saturation_var,
+                       activebackground=self.theme["panel"], font=compact_font, padx=0, pady=0).pack(side="left", padx=(2, 0))
+        tk.Checkbutton(live_display_bar, text="Sat", variable=self.live_show_saturation_var,
                        command=lambda: self._schedule_live_render(force=True),
                        bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
-                       activebackground=self.theme["panel"]).pack(side="left", padx=(6, 0))
+                       activebackground=self.theme["panel"], font=compact_font, padx=0, pady=0).pack(side="left", padx=(2, 0))
         tk.Checkbutton(live_display_bar, text="Cross", variable=self.live_cross_enabled_var,
                        command=self.toggle_live_cross,
                        bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
-                       activebackground=self.theme["panel"]).pack(side="left", padx=(6, 0))
-        tk.Label(live_display_bar, textvariable=self.live_profile_status_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(7, 3))
-        tk.Label(live_display_bar, textvariable=self.live_gamma_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(7, 3))
+                       activebackground=self.theme["panel"], font=compact_font, padx=0, pady=0).pack(side="left", padx=(2, 0))
+        tk.Label(live_display_bar, textvariable=self.live_profile_status_var, fg="#9aa6b2", bg=self.theme["panel"], font=compact_font).pack(side="left", padx=(4, 2))
+        tk.Label(live_display_bar, textvariable=self.live_gamma_label_var, fg="#9aa6b2", bg=self.theme["panel"], font=compact_font).pack(side="left", padx=(4, 2))
         tk.Scale(live_display_bar, variable=self.live_gamma_var, from_=0.2, to=3.0, resolution=0.1,
-                 orient="horizontal", length=90, showvalue=False, command=self.on_live_gamma_change,
+                 orient="horizontal", length=70, showvalue=False, command=self.on_live_gamma_change,
                  bg=self.theme["panel"], fg=self.theme["text"], troughcolor=self.theme["field"],
                  highlightthickness=0).pack(side="left")
-        tk.Button(live_display_bar, text="Reset Gamma", command=self.reset_live_gamma).pack(side="left", padx=(4, 0))
-        tk.Button(live_display_bar, text="Snapshot", command=self.snapshot_live_view).pack(side="left", padx=(5, 0))
-        tk.Label(live_display_bar, textvariable=self.live_zoom_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(8, 3))
+        tk.Button(live_display_bar, text="Reset", command=self.reset_live_gamma, font=compact_font, padx=3, pady=0).pack(side="left", padx=(2, 0))
+        tk.Button(live_display_bar, text="Snap", command=self.snapshot_live_view, font=compact_font, padx=3, pady=0).pack(side="left", padx=(2, 0))
+        tk.Label(live_display_bar, textvariable=self.live_zoom_label_var, fg="#9aa6b2", bg=self.theme["panel"], font=compact_font).pack(side="left", padx=(4, 2))
         tk.Button(live_display_bar, text="-", width=2, command=lambda: self.zoom_live_view(1 / 1.25)).pack(side="left")
-        tk.Button(live_display_bar, text="Fit", command=self.fit_live_view).pack(side="left", padx=(4, 0))
-        tk.Button(live_display_bar, text="+", width=2, command=lambda: self.zoom_live_view(1.25)).pack(side="left", padx=(4, 0))
+        tk.Button(live_display_bar, text="Fit", command=self.fit_live_view, font=compact_font, padx=3, pady=0).pack(side="left", padx=(2, 0))
+        tk.Button(live_display_bar, text="+", width=2, command=lambda: self.zoom_live_view(1.25)).pack(side="left", padx=(2, 0))
         live_profile_grid = tk.Frame(live_tab, bg=self.theme["panel"])
         live_profile_grid.pack(fill="both", expand=True)
         live_profile_grid.grid_rowconfigure(0, weight=1)
@@ -643,15 +656,22 @@ class UIBuilderMixin:
             widget.bind("<Button-5>", lambda _e: self.step_hyper_band(-1))
             widget.bind("<Button-1>", lambda _e, target=widget: target.focus_set(), add="+")
 
-        status_frame = tk.LabelFrame(parent, text="Status / Messages", padx=6, pady=6)
+        status_frame = tk.LabelFrame(parent, text="Run Status", padx=6, pady=6)
         status_frame.grid(row=2, column=0, sticky="ew", pady=(6, 0))
         status_strip = tk.Frame(status_frame)
         status_strip.pack(fill="x", pady=(0, 4))
-        tk.Label(status_strip, textvariable=self.timelapse_status_var, font=("Segoe UI Semibold", 9)).pack(side="left")
-        ttk.Separator(status_strip, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=8)
-        tk.Label(status_strip, textvariable=self.time_remaining_var, fg="#9aa6b2").pack(side="left")
-        ttk.Separator(status_strip, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=8)
-        tk.Label(status_strip, textvariable=self.live_view_status_var, fg="#9aa6b2").pack(side="left")
+        tk.Label(status_strip, text="Status:", fg=self.theme["muted"], font=compact_font).pack(side="left")
+        status_value = tk.Label(status_strip, textvariable=self.app_state_var, fg="#7ad97a", font=("Segoe UI Semibold", 8))
+        status_value.pack(side="left", padx=(3, 6))
+        self.right_app_state_label = status_value
+        for label, var in (
+            ("Site", self.current_site_var),
+            ("Cycle", self.current_cycle_var),
+            ("Next loop", self.next_loop_remaining_var),
+        ):
+            tk.Label(status_strip, text="|", fg=self.theme["muted"], font=compact_font).pack(side="left", padx=(0, 6))
+            tk.Label(status_strip, text=f"{label}:", fg=self.theme["muted"], font=compact_font).pack(side="left")
+            tk.Label(status_strip, textvariable=var, fg=self.theme["text"], font=compact_font).pack(side="left", padx=(3, 6))
         tk.Checkbutton(
             status_strip,
             text="Details",
@@ -659,6 +679,20 @@ class UIBuilderMixin:
             command=self.refresh_visible_log,
         ).pack(side="right")
         tk.Button(status_strip, text="Open Log", command=self.open_last_issues_log).pack(side="right", padx=(0, 6))
+        self.run_progressbar = ttk.Progressbar(
+            status_frame,
+            variable=self.run_progress_var,
+            maximum=100,
+            mode="determinate",
+        )
+        self.run_progressbar.pack(fill="x", pady=(1, 1))
+        tk.Label(
+            status_frame,
+            textvariable=self.run_progress_text_var,
+            fg=self.theme["muted"],
+            anchor="w",
+            font=compact_font,
+        ).pack(fill="x")
         self.log_text = tk.Text(status_frame, height=6, state="disabled", wrap="word", bg=self.theme["field"], fg=self.theme["text"], insertbackground=self.theme["accent_soft"], relief="flat")
         self.log_text.pack(fill="x", expand=False)
         self.refresh_visible_log()
@@ -666,48 +700,16 @@ class UIBuilderMixin:
     def _build_right_controls(self, parent):
         acquisition = tk.LabelFrame(parent, text="Acquisition / Timelapse", padx=6, pady=5)
         acquisition.pack(fill="x", pady=(0, 6))
-        tk.Button(acquisition, text="Run Selected Site", command=self.manual_trigger_selected_position).pack(fill="x", pady=2)
-        start_button = tk.Button(acquisition, text="Start Acquisition", command=self.start_acquisition)
+        start_button = tk.Button(acquisition, text="Start Single Acquisition", command=self.start_acquisition)
         start_button.pack(fill="x", pady=2)
         self.start_acquisition_buttons.append(start_button)
-        tk.Button(acquisition, text="Abort Hera Acquisition", command=self.abort_acquisition).pack(fill="x", pady=2)
-        run_status = tk.LabelFrame(acquisition, text="Run Status", padx=5, pady=4)
-        run_status.pack(fill="x", pady=(5, 0))
-        for label, var, strong in (
-            ("Status", self.app_state_var, True),
-            ("Site", self.current_site_var, False),
-            ("Cycle", self.current_cycle_var, False),
-        ):
-            row = tk.Frame(run_status)
-            row.pack(fill="x", pady=1)
-            tk.Label(row, text=f"{label}:", fg=self.theme["muted"], width=7, anchor="w").pack(side="left")
-            value_label = tk.Label(
-                row,
-                textvariable=var,
-                anchor="w",
-                font=("Segoe UI Semibold", 9) if strong else ("Segoe UI", 9),
-                fg="#7ad97a" if strong else self.theme["text"],
-            )
-            value_label.pack(side="left", fill="x", expand=True)
-            if strong:
-                self.right_app_state_label = value_label
-        self.run_progressbar = ttk.Progressbar(
-            run_status,
-            variable=self.run_progress_var,
-            maximum=100,
-            mode="determinate",
-        )
-        self.run_progressbar.pack(fill="x", pady=(5, 1))
-        tk.Label(
-            run_status,
-            textvariable=self.run_progress_text_var,
-            fg=self.theme["muted"],
-            anchor="w",
-        ).pack(fill="x")
+        tk.Button(acquisition, text="Abort Acquisition", command=self.abort_acquisition).pack(fill="x", pady=2)
         ttk.Separator(acquisition, orient="horizontal", style="Dark.TSeparator").pack(fill="x", pady=6)
 
         self.interval_var = tk.DoubleVar(value=10.0)
         self.stop_after_var = tk.DoubleVar(value=0.0)
+        self.timelapse_site_retries_var = tk.IntVar(value=3)
+        self.timelapse_sites_var = tk.StringVar(value="all")
         for label, var in (
             ("Interval (min)", self.interval_var),
             ("Dwell (s)", self.stage_dwell_var),
@@ -718,13 +720,16 @@ class UIBuilderMixin:
             row.pack(fill="x", pady=1)
             tk.Label(row, text=label, width=13, anchor="w").pack(side="left")
             tk.Entry(row, textvariable=var, width=7).pack(side="left")
-        tk.Label(acquisition, textvariable=self.timelapse_status_var, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(6, 0))
-        tk.Label(acquisition, textvariable=self.time_remaining_var).pack(anchor="w", pady=(1, 5))
-        tk.Button(acquisition, text="Start Timelapse", command=self.start_timelapse, bg="#ff8b3d", fg="#111111", activebackground="#ffb37a").pack(fill="x", pady=2)
+        sites_row = tk.Frame(acquisition)
+        sites_row.pack(fill="x", pady=(4, 1))
+        tk.Label(sites_row, text="Sites", width=13, anchor="w").pack(side="left")
+        tk.Entry(sites_row, textvariable=self.timelapse_sites_var, width=12).pack(side="left", fill="x", expand=True)
+        tk.Button(sites_row, text="All", command=self.select_all_timelapse_sites, width=5).pack(side="left", padx=(4, 0))
+        tk.Button(acquisition, text="Run One Loop", command=self.run_one_cycle).pack(fill="x", pady=2)
+        tk.Button(acquisition, text="Run Timelapse", command=self.start_timelapse, bg="#ff8b3d", fg="#111111", activebackground="#ffb37a").pack(fill="x", pady=2)
         self.pause_button = tk.Button(acquisition, text="Pause", command=self.pause_or_resume_timelapse)
         self.pause_button.pack(fill="x", pady=2)
         tk.Button(acquisition, text="Stop Timelapse", command=self.stop_timelapse).pack(fill="x", pady=2)
-        tk.Button(acquisition, text="Run First 2 Sites", command=self.run_first_two_sites).pack(fill="x", pady=2)
 
         saving = tk.LabelFrame(parent, text="Export", padx=6, pady=5)
         saving.pack(fill="x", pady=(0, 6))
@@ -805,7 +810,7 @@ class UIBuilderMixin:
                 pass
         for button in (
             getattr(self, "flatfield_acquire_button", None),
-            getattr(self, "flatfield_use_current_button", None),
+            getattr(self, "flatfield_import_button", None),
             getattr(self, "flatfield_clear_button", None),
         ):
             if button:
@@ -878,16 +883,16 @@ class UIBuilderMixin:
 
         actions = tk.Frame(params)
         actions.grid(row=row, column=0, columnspan=3, pady=8, sticky="w")
-        start_button = tk.Button(actions, text="Start Acquisition", command=self.start_acquisition)
+        start_button = tk.Button(actions, text="Start Single Acquisition", command=self.start_acquisition)
         start_button.pack(side="left", padx=(0, 6))
         self.start_acquisition_buttons.append(start_button)
-        tk.Button(actions, text="Abort Hera Acquisition", command=self.abort_acquisition).pack(side="left", padx=6)
+        tk.Button(actions, text="Abort Acquisition", command=self.abort_acquisition).pack(side="left", padx=6)
 
     def _build_tango_ui(self, parent):
         frame = tk.LabelFrame(parent, text="Stage Control", padx=10, pady=10)
         frame.pack(fill="both", expand=True)
         frame.grid_columnconfigure(0, weight=1)
-        self.stage_speed_var = tk.DoubleVar(value=20.0)
+        self.stage_speed_var = tk.DoubleVar(value=5.0)
         self.stage_dwell_var = tk.DoubleVar(value=1.0)
         self.live_pixel_size_var = tk.DoubleVar(value=1.0)
         self.live_invert_x_var = tk.BooleanVar(value=False)
@@ -903,10 +908,10 @@ class UIBuilderMixin:
         actions.grid(row=0, column=0, sticky="ew", pady=(10, 0))
         tk.Label(actions, text="Position name").pack(anchor="w", pady=(0, 2))
         tk.Entry(actions, textvariable=self.selected_name_var, width=24).pack(fill="x", pady=(0, 6))
-        tk.Button(actions, text="Add Current Position", command=self.add_current_position).pack(fill="x", pady=4)
-        tk.Button(actions, text="Update Selected Position", command=self.update_selected_position).pack(fill="x", pady=4)
+        tk.Button(actions, text="Add New Site", command=self.add_current_position).pack(fill="x", pady=4)
+        tk.Button(actions, text="Update Selected Site", command=self.update_selected_position).pack(fill="x", pady=4)
         tk.Button(actions, text="Delete Selected Row", command=self.delete_selected_position).pack(fill="x", pady=4)
-        tk.Button(actions, text="Rename Selected Position", command=self.rename_selected_position).pack(fill="x", pady=4)
+        tk.Button(actions, text="Rename Selected Site", command=self.rename_selected_position).pack(fill="x", pady=4)
         tk.Button(actions, text="Go To Selected Position", command=self.goto_selected_position).pack(fill="x", pady=4)
         tk.Button(actions, text="Reconnect Stage", command=self.reconnect_stage).pack(fill="x", pady=4)
 
@@ -931,8 +936,13 @@ class UIBuilderMixin:
         tk.Entry(tl, textvariable=self.stop_after_var, width=8).grid(row=1, column=1, sticky="w", padx=(6, 10), pady=(10, 0))
         tk.Label(tl, text="Speed XY").grid(row=1, column=2, sticky="w", pady=(10, 0))
         tk.Entry(tl, textvariable=self.stage_speed_var, width=8).grid(row=1, column=3, sticky="w", pady=(10, 0))
-        tk.Label(tl, textvariable=self.timelapse_status_var, font=("Segoe UI", 10, "bold")).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
-        tk.Label(tl, textvariable=self.time_remaining_var).grid(row=2, column=2, columnspan=2, sticky="w", pady=(10, 0))
+        self.timelapse_site_retries_var = tk.IntVar(value=3)
+        self.timelapse_sites_var = tk.StringVar(value="all")
+        tk.Label(tl, text="Sites").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        tk.Entry(tl, textvariable=self.timelapse_sites_var, width=8).grid(row=2, column=1, sticky="w", padx=(6, 10), pady=(10, 0))
+        tk.Button(tl, text="All", command=self.select_all_timelapse_sites).grid(row=2, column=2, sticky="w", pady=(10, 0))
+        tk.Label(tl, text="Next loop").grid(row=3, column=0, sticky="w", pady=(10, 0))
+        tk.Label(tl, textvariable=self.next_loop_remaining_var).grid(row=3, column=1, sticky="w", padx=(6, 10), pady=(10, 0))
 
     def _build_nis_z_ui(self, parent):
         frame = tk.LabelFrame(parent, text="NIS Z Bridge", padx=6, pady=5)
@@ -986,9 +996,11 @@ class UIBuilderMixin:
         ttk.Separator(state_frame, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=12)
         tk.Label(state_frame, textvariable=self.center_stage_summary_var, fg="#9aa6b2").pack(side="left")
         ttk.Separator(state_frame, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=12)
-        tk.Label(state_frame, textvariable=self.current_cycle_var, fg="#9aa6b2").pack(side="left")
+        tk.Label(state_frame, text="Cycle:", fg="#9aa6b2").pack(side="left")
+        tk.Label(state_frame, textvariable=self.current_cycle_var, fg="#9aa6b2").pack(side="left", padx=(4, 0))
         ttk.Separator(state_frame, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=12)
-        tk.Label(state_frame, textvariable=self.current_site_var, fg="#9aa6b2").pack(side="left")
+        tk.Label(state_frame, text="Site:", fg="#9aa6b2").pack(side="left")
+        tk.Label(state_frame, textvariable=self.current_site_var, fg="#9aa6b2").pack(side="left", padx=(4, 0))
 
         views_frame = tk.LabelFrame(parent, text="Views", padx=10, pady=10)
         views_frame.pack(fill="both", expand=True, pady=(10, 10))
@@ -1120,12 +1132,14 @@ class UIBuilderMixin:
 
         center_tree_wrap = tk.Frame(pos_frame)
         center_tree_wrap.pack(fill="both", expand=True)
-        self.positions_tree = ttk.Treeview(center_tree_wrap, columns=("name", "x", "y", "z", "roi"), show="headings", height=4, style="Dark.Treeview")
+        self.positions_tree = ttk.Treeview(center_tree_wrap, columns=("site", "name", "x", "y", "z", "roi"), show="headings", height=4, style="Dark.Treeview")
+        self.positions_tree.heading("site", text="Site")
         self.positions_tree.heading("name", text="Name")
         self.positions_tree.heading("x", text="X")
         self.positions_tree.heading("y", text="Y")
         self.positions_tree.heading("z", text="Z")
         self.positions_tree.heading("roi", text="ROI")
+        self.positions_tree.column("site", width=60, anchor="center")
         self.positions_tree.column("name", width=220, anchor="w")
         self.positions_tree.column("x", width=125, anchor="e")
         self.positions_tree.column("y", width=125, anchor="e")
@@ -1139,13 +1153,18 @@ class UIBuilderMixin:
 
         status_strip = tk.Frame(parent)
         status_strip.pack(fill="x", pady=(0, 10))
-        tk.Label(status_strip, textvariable=self.timelapse_status_var, font=("Segoe UI Semibold", 10)).pack(side="left")
-        ttk.Separator(status_strip, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=12)
-        tk.Label(status_strip, textvariable=self.time_remaining_var, fg="#9aa6b2").pack(side="left")
-        ttk.Separator(status_strip, orient="vertical", style="Dark.TSeparator").pack(side="left", fill="y", padx=12)
-        tk.Label(status_strip, textvariable=self.last_export_var, fg="#9aa6b2").pack(side="left")
+        tk.Label(status_strip, text="Status:", fg="#9aa6b2").pack(side="left")
+        tk.Label(status_strip, textvariable=self.app_state_var, font=("Segoe UI Semibold", 10)).pack(side="left", padx=(4, 10))
+        for label, var in (
+            ("Site", self.current_site_var),
+            ("Cycle", self.current_cycle_var),
+            ("Next loop", self.next_loop_remaining_var),
+        ):
+            tk.Label(status_strip, text="|", fg="#9aa6b2").pack(side="left", padx=(0, 10))
+            tk.Label(status_strip, text=f"{label}:", fg="#9aa6b2").pack(side="left")
+            tk.Label(status_strip, textvariable=var).pack(side="left", padx=(4, 10))
 
-        log_frame = tk.LabelFrame(parent, text="Status / Messages", padx=10, pady=10)
+        log_frame = tk.LabelFrame(parent, text="Run Status", padx=10, pady=10)
         log_frame.pack(fill="both", expand=True)
         self.log_text = tk.Text(log_frame, height=16, state="disabled", wrap="word", bg="#0f1318", fg="#e7edf5", insertbackground="#ffb37a", relief="flat")
         self.log_text.pack(fill="both", expand=True)

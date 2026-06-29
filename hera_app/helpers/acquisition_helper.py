@@ -361,6 +361,11 @@ def flatfield_alignment_for_sample(sample_info, flat_info):
         }
 
     if sample_camera_roi and not flat_camera_roi:
+        if sample_source_width == flat_source_width and sample_source_height == flat_source_height:
+            sample_roi = sample_display_roi or (0, 0, sample_source_width, sample_source_height)
+            plan = make_plan(sample_roi, sample_roi, "matching-roi-source")
+            if plan:
+                return plan
         camera_x, camera_y, camera_w, camera_h = sample_camera_roi
         if camera_w > 0 and camera_h > 0:
             scale_x = sample_source_width / camera_w

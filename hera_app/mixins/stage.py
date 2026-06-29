@@ -162,6 +162,7 @@ class StageMixin:
                 "end",
                 iid=str(index),
                 values=(
+                    str(index + 1),
                     pos.name,
                     f"{pos.x:.3f}",
                     f"{pos.y:.3f}",
@@ -273,6 +274,24 @@ class StageMixin:
             raise RuntimeError("Select a saved position first.")
         return self.positions[self.selected_position_index]
 
+    def _get_selected_positions(self):
+        selected_indices = []
+        try:
+            selection = self.positions_tree.selection()
+        except Exception:
+            selection = ()
+        for item in selection:
+            try:
+                index = int(item)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < len(self.positions) and index not in selected_indices:
+                selected_indices.append(index)
+        if not selected_indices:
+            return [self._get_selected_position()]
+        selected_indices.sort()
+        return [self.positions[index] for index in selected_indices]
+
     def update_selected_position(self):
         try:
             position = self._get_selected_position()
@@ -312,12 +331,31 @@ class StageMixin:
 
     def delete_selected_position(self):
         try:
-            position = self._get_selected_position()
-            del self.positions[self.selected_position_index]
+            selected_indices = []
+            try:
+                selection = self.positions_tree.selection()
+            except Exception:
+                selection = ()
+            for item in selection:
+                try:
+                    index = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < len(self.positions) and index not in selected_indices:
+                    selected_indices.append(index)
+            if not selected_indices:
+                position = self._get_selected_position()
+                selected_indices = [self.selected_position_index]
+                deleted_names = [position.name]
+            else:
+                selected_indices.sort()
+                deleted_names = [self.positions[index].name for index in selected_indices]
+            for index in reversed(selected_indices):
+                del self.positions[index]
             self.selected_position_index = None
             self.refresh_positions_tree()
             self.center_stage_summary_var.set("Selected position: none")
-            self.log(f"Deleted position {position.name}.")
+            self.log(f"Deleted position(s): {', '.join(deleted_names)}.")
         except Exception as exc:
             self.log(f"Failed to delete position: {exc}")
             self.update_state("Error")

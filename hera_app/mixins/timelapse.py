@@ -31,12 +31,87 @@ class TimelapseMixin:
             return f"{label}. No per-site ROI saved; using current ROI for all sites: {self._format_roi(fallback_roi)}."
         return f"{label}. No ROI active; all sites will acquire the full frame."
 
+    def select_all_timelapse_sites(self):
+        sites_var = getattr(self, "timelapse_sites_var", None)
+        if sites_var is not None:
+            sites_var.set("all")
+        self.log("Timelapse site selection set to all sites.")
+
+    def _timelapse_site_selection_text(self):
+        sites_var = getattr(self, "timelapse_sites_var", None)
+        if sites_var is None:
+            return "all"
+        try:
+            return str(sites_var.get()).strip()
+        except Exception:
+            return "all"
+
+    def _parse_timelapse_site_indices(self, text, site_count):
+        text = (text or "").strip()
+        if not text or text.lower() in {"all", "*"}:
+            return list(range(site_count))
+        normalized = text.replace(";", ",").replace(" ", ",").replace("\t", ",")
+        indices = []
+        seen = set()
+        invalid = []
+        for token in (part.strip() for part in normalized.split(",")):
+            if not token:
+                continue
+            try:
+                if "-" in token:
+                    start_text, end_text = (part.strip() for part in token.split("-", 1))
+                    start = int(start_text)
+                    end = int(end_text)
+                    step = 1 if end >= start else -1
+                    site_numbers = range(start, end + step, step)
+                else:
+                    site_numbers = (int(token),)
+            except ValueError:
+                invalid.append(token)
+                continue
+            for site_number in site_numbers:
+                if site_number < 1 or site_number > site_count:
+                    invalid.append(str(site_number))
+                    continue
+                index = site_number - 1
+                if index not in seen:
+                    seen.add(index)
+                    indices.append(index)
+        if invalid:
+            valid_range = f"1-{site_count}" if site_count else "none"
+            raise ValueError(f"Invalid site selection {', '.join(invalid)}. Valid site numbers: {valid_range}.")
+        if not indices:
+            raise ValueError("No valid sites were selected.")
+        return indices
+
+    def _timelapse_selected_positions(self):
+        positions = list(self.positions)
+        if not positions:
+            return []
+        indices = self._parse_timelapse_site_indices(self._timelapse_site_selection_text(), len(positions))
+        return [positions[index] for index in indices]
+
+    def _timelapse_site_selection_label(self, positions):
+        positions = list(positions)
+        site_numbers = []
+        for selected_position in positions:
+            for index, position in enumerate(self.positions):
+                if position is selected_position:
+                    site_numbers.append(str(index + 1))
+                    break
+        return ", ".join(site_numbers) if site_numbers else "none"
+
     def run_one_cycle(self):
         if self.timelapse_thread and self.timelapse_thread.is_alive():
             self.log("Timelapse is already running.")
             return
-        if not self.positions:
-            self.log("Add at least one stage position before running a cycle.")
+        try:
+            cycle_positions = self._timelapse_selected_positions()
+        except Exception as exc:
+            self.log(f"Choose valid site numbers before running one loop: {exc}")
+            return
+        if not cycle_positions:
+            self.log("Add at least one stage position before running one loop.")
             return
         if not self._validate_auto_save_export_options():
             return
@@ -44,6 +119,8 @@ class TimelapseMixin:
         self.timelapse_stop_event.clear()
         self.timelapse_pause_event.clear()
         self.trigger_log = []
+        self.trigger_log_path = ""
+        self._begin_trigger_log_file()
         self.timelapse_started_at = datetime.now()
         self.timelapse_stop_at = None
         self.timelapse_roi = self._get_active_roi()
@@ -52,53 +129,22 @@ class TimelapseMixin:
         self.update_state("RunningTimelapse")
 
         run_id = self._begin_timelapse_run()
-        self.timelapse_thread = threading.Thread(target=self._timelapse_worker, args=(True, None, run_id), daemon=True)
+        self.timelapse_thread = threading.Thread(target=self._timelapse_worker, args=(True, cycle_positions, run_id), daemon=True)
         self.timelapse_thread.start()
-        self.log(self._roi_plan_message("Running one cycle", self.positions))
-        self.log(f"Auto-save products: {self._export_selection_text()}.")
-
-    def _first_two_test_sites(self):
-        positions = list(self.positions)
-        real_sites = [position for position in positions if position.name.strip().lower() != "start"]
-        return (real_sites or positions)[:2]
-
-    def run_first_two_sites(self):
-        if self.timelapse_thread and self.timelapse_thread.is_alive():
-            self.log("Timelapse is already running.")
-            return
-        test_sites = self._first_two_test_sites()
-        if not test_sites:
-            self.log("Add at least one stage position before running a two-site test.")
-            return
-        if not self._validate_auto_save_export_options():
-            return
-
-        self.timelapse_stop_event.clear()
-        self.timelapse_pause_event.clear()
-        self.trigger_log = []
-        self.timelapse_started_at = datetime.now()
-        self.timelapse_stop_at = None
-        self.timelapse_roi = self._get_active_roi()
-        self.pause_button.config(text="Pause")
-        self.timelapse_status_var.set("Timelapse: running")
-        self.update_state("RunningTimelapse")
-
-        run_id = self._begin_timelapse_run()
-        self.timelapse_thread = threading.Thread(
-            target=self._timelapse_worker,
-            args=(True, test_sites, run_id),
-            daemon=True,
-        )
-        self.timelapse_thread.start()
-        site_names = ", ".join(position.name for position in test_sites)
-        self.log(self._roi_plan_message(f"Running first {len(test_sites)} site(s): {site_names}", test_sites))
+        site_label = self._timelapse_site_selection_label(cycle_positions)
+        self.log(self._roi_plan_message(f"Running one loop for site(s): {site_label}", cycle_positions))
         self.log(f"Auto-save products: {self._export_selection_text()}.")
 
     def start_timelapse(self):
         if self.timelapse_thread and self.timelapse_thread.is_alive():
             self.log("Timelapse is already running.")
             return
-        if not self.positions:
+        try:
+            timelapse_positions = self._timelapse_selected_positions()
+        except Exception as exc:
+            self.log(f"Choose valid site numbers before starting timelapse: {exc}")
+            return
+        if not timelapse_positions:
             self.log("Add at least one stage position before starting timelapse.")
             return
 
@@ -112,6 +158,8 @@ class TimelapseMixin:
         self.timelapse_stop_event.clear()
         self.timelapse_pause_event.clear()
         self.trigger_log = []
+        self.trigger_log_path = ""
+        self._begin_trigger_log_file()
         self.timelapse_started_at = datetime.now()
         stop_after = float(self.stop_after_var.get())
         self.timelapse_stop_at = self.timelapse_started_at + timedelta(minutes=stop_after) if stop_after > 0 else None
@@ -121,9 +169,10 @@ class TimelapseMixin:
         self.update_state("RunningTimelapse")
 
         run_id = self._begin_timelapse_run()
-        self.timelapse_thread = threading.Thread(target=self._timelapse_worker, args=(False, None, run_id), daemon=True)
+        self.timelapse_thread = threading.Thread(target=self._timelapse_worker, args=(False, timelapse_positions, run_id), daemon=True)
         self.timelapse_thread.start()
-        self.log(self._roi_plan_message("Timelapse started", self.positions))
+        site_label = self._timelapse_site_selection_label(timelapse_positions)
+        self.log(self._roi_plan_message(f"Timelapse started for site(s): {site_label}", timelapse_positions))
         self.log(f"Auto-save products: {self._export_selection_text()}.")
 
     def pause_or_resume_timelapse(self):
@@ -188,7 +237,9 @@ class TimelapseMixin:
                     break
 
                 cycle += 1
-                self._set_var_async(self.current_cycle_var, f"Cycle: {cycle}")
+                self.next_loop_deadline = None
+                self._set_var_async(self.next_loop_remaining_var, "-")
+                self._set_var_async(self.current_cycle_var, str(cycle))
                 self._log_async(f"Cycle {cycle} started.")
                 for position in positions:
                     if self.timelapse_stop_event.is_set():
@@ -197,25 +248,7 @@ class TimelapseMixin:
                     if self.timelapse_stop_event.is_set():
                         break
 
-                    export_path, confirmed_z, z_status = self.run_stage_site_acquisition(position, cycle_index=cycle)
-                    if self.timelapse_stop_event.is_set():
-                        break
-                    x, y, _, _ = self.tango.get_position()
-                    self.trigger_log.append(
-                        {
-                            "Cycle": cycle,
-                            "Site": position.name,
-                            "X": f"{x:.6f}",
-                            "Y": f"{y:.6f}",
-                            "Z": f"{confirmed_z:.6f}" if confirmed_z is not None else "",
-                            "ZStatus": z_status,
-                            "Timestamp": datetime.now().isoformat(timespec="seconds"),
-                            "ExportPath": export_path,
-                            "ROI": self._format_roi_short(self._get_position_roi(position) or self.timelapse_roi),
-                            "Status": "confirmed",
-                        }
-                    )
-                    self._log_async(f"Cycle {cycle}: completed {position.name} -> {export_path}")
+                    self._run_site_with_retries(position, cycle)
 
                 if self.timelapse_stop_event.is_set():
                     break
@@ -227,6 +260,7 @@ class TimelapseMixin:
                     break
 
                 next_cycle_time = datetime.now() + timedelta(minutes=interval_min)
+                self.next_loop_deadline = next_cycle_time
                 self._log_async(
                     f"Cycle {cycle} complete. Waiting {interval_min:.2f} minutes from loop completion before next cycle."
                 )
@@ -238,6 +272,8 @@ class TimelapseMixin:
                         self.timelapse_stop_event.set()
                         break
                     time.sleep(0.25)
+                self.next_loop_deadline = None
+                self._set_var_async(self.next_loop_remaining_var, "-")
         except TimelapseStopped as exc:
             self._log_async(str(exc) or "Timelapse stopped.")
         except Exception as exc:
@@ -252,11 +288,13 @@ class TimelapseMixin:
             return
         self.timelapse_stop_event.set()
         self.timelapse_pause_event.clear()
+        self.next_loop_deadline = None
         self.pause_button.config(text="Pause")
         self.timelapse_status_var.set("Timelapse: idle")
         self.time_remaining_var.set("Time remaining: -")
-        self.current_cycle_var.set("Cycle: -")
-        self.current_site_var.set("Site: -")
+        self.next_loop_remaining_var.set("-")
+        self.current_cycle_var.set("-")
+        self.current_site_var.set("-")
         if self.app_state != self.STATE_LABELS["Error"]:
             self.update_state("Ready" if self.controller and self.controller.connected else "Idle")
         if not getattr(self, "is_closing", False) and not (self.controller and self.controller.connected):
@@ -267,20 +305,131 @@ class TimelapseMixin:
     def _write_trigger_log_if_needed(self):
         if not self.trigger_log:
             return
+        if getattr(self, "trigger_log_path", ""):
+            self._log_async(f"Trigger log saved: {self.trigger_log_path}")
+            return
         output_dir = self.param_vars["output_path"].get()
         os.makedirs(output_dir, exist_ok=True)
         log_path = os.path.join(output_dir, f"hera_tango_trigger_log_{time.strftime('%Y%m%d_%H%M%S')}.csv")
         with open(log_path, "w", newline="", encoding="utf-8") as csv_file:
-            writer = csv.DictWriter(csv_file, fieldnames=["Cycle", "Site", "X", "Y", "Z", "ZStatus", "Timestamp", "ExportPath", "ROI", "Status"])
+            writer = csv.DictWriter(csv_file, fieldnames=self._trigger_log_fieldnames())
             writer.writeheader()
             writer.writerows(self.trigger_log)
         self._log_async(f"Trigger log saved: {log_path}")
+
+    def _trigger_log_fieldnames(self):
+        return ["Cycle", "Site", "Attempt", "X", "Y", "Z", "ZStatus", "Timestamp", "ExportPath", "ROI", "Status", "Error"]
+
+    def _begin_trigger_log_file(self):
+        try:
+            output_dir = self.param_vars["output_path"].get()
+            os.makedirs(output_dir, exist_ok=True)
+            self.trigger_log_path = os.path.join(output_dir, f"hera_tango_trigger_log_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+            with open(self.trigger_log_path, "w", newline="", encoding="utf-8") as csv_file:
+                writer = csv.DictWriter(csv_file, fieldnames=self._trigger_log_fieldnames())
+                writer.writeheader()
+            self._log_async(f"Trigger log started: {self.trigger_log_path}")
+        except Exception as exc:
+            self.trigger_log_path = ""
+            self._log_async(f"Could not start trigger log file: {exc}")
+
+    def _record_trigger_log_entry(self, entry):
+        fieldnames = self._trigger_log_fieldnames()
+        row = {field: entry.get(field, "") for field in fieldnames}
+        self.trigger_log.append(row)
+        if not getattr(self, "trigger_log_path", ""):
+            self._begin_trigger_log_file()
+        if not getattr(self, "trigger_log_path", ""):
+            return
+        try:
+            with open(self.trigger_log_path, "a", newline="", encoding="utf-8") as csv_file:
+                writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                writer.writerow(row)
+        except Exception as exc:
+            self._log_async(f"Could not append trigger log entry: {exc}")
+
+    def _timelapse_site_retry_count(self):
+        retries_var = getattr(self, "timelapse_site_retries_var", None)
+        try:
+            retries = int(retries_var.get()) if retries_var is not None else 1
+        except Exception:
+            retries = 1
+        return max(0, retries)
+
+    def _current_stage_xy_strings(self):
+        try:
+            if self.tango and self.tango.connected:
+                x, y, _, _ = self.tango.get_position()
+                return f"{x:.6f}", f"{y:.6f}"
+        except Exception:
+            pass
+        return "", ""
+
+    def _run_site_with_retries(self, position, cycle_index):
+        attempts = self._timelapse_site_retry_count() + 1
+        last_error = ""
+        for attempt in range(1, attempts + 1):
+            if self.timelapse_stop_event.is_set():
+                raise TimelapseStopped("Timelapse stopped before site acquisition.")
+            try:
+                if attempt > 1:
+                    self._log_async(f"Retrying {position.name} (attempt {attempt}/{attempts})...")
+                export_path, confirmed_z, z_status = self.run_stage_site_acquisition(position, cycle_index=cycle_index)
+                if self.timelapse_stop_event.is_set():
+                    raise TimelapseStopped("Timelapse stopped by user.")
+                x, y = self._current_stage_xy_strings()
+                self._record_trigger_log_entry(
+                    {
+                        "Cycle": cycle_index,
+                        "Site": position.name,
+                        "Attempt": attempt,
+                        "X": x,
+                        "Y": y,
+                        "Z": f"{confirmed_z:.6f}" if confirmed_z is not None else "",
+                        "ZStatus": z_status,
+                        "Timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "ExportPath": export_path,
+                        "ROI": self._format_roi_short(self._get_position_roi(position) or self.timelapse_roi),
+                        "Status": "confirmed",
+                        "Error": "",
+                    }
+                )
+                self._log_async(f"Cycle {cycle_index}: completed {position.name} -> {export_path}")
+                return True
+            except TimelapseStopped:
+                raise
+            except Exception as exc:
+                last_error = str(exc)
+                self._log_async(f"Cycle {cycle_index}: {position.name} attempt {attempt}/{attempts} failed: {last_error}")
+                self._safe_after(0, lambda: self.update_state("RunningTimelapse"))
+                if attempt < attempts and not self.timelapse_stop_event.is_set():
+                    time.sleep(2.0)
+
+        x, y = self._current_stage_xy_strings()
+        self._record_trigger_log_entry(
+            {
+                "Cycle": cycle_index,
+                "Site": position.name,
+                "Attempt": attempts,
+                "X": x,
+                "Y": y,
+                "Z": "",
+                "ZStatus": "failed",
+                "Timestamp": datetime.now().isoformat(timespec="seconds"),
+                "ExportPath": "",
+                "ROI": self._format_roi_short(self._get_position_roi(position) or self.timelapse_roi),
+                "Status": "failed",
+                "Error": last_error,
+            }
+        )
+        self._log_async(f"Cycle {cycle_index}: skipped {position.name} after {attempts} failed attempt(s).")
+        return False
 
     def _wait_while_paused(self):
         while self.timelapse_pause_event.is_set() and not self.timelapse_stop_event.is_set():
             time.sleep(0.1)
 
-    def _await_timelapse_acquisition_completion(self, timeout_sec=300):
+    def _await_timelapse_acquisition_completion(self, timeout_sec=600):
         deadline = time.time() + timeout_sec
         abort_requested = False
         while time.time() < deadline:
@@ -305,6 +454,21 @@ class TimelapseMixin:
             self.time_remaining_var.set(f"Time remaining: {seconds / 60:.2f} min")
         elif not (self.timelapse_thread and self.timelapse_thread.is_alive()):
             self.time_remaining_var.set("Time remaining: -")
+        next_loop_deadline = getattr(self, "next_loop_deadline", None)
+        if self.timelapse_thread and self.timelapse_thread.is_alive() and next_loop_deadline:
+            remaining = next_loop_deadline - datetime.now()
+            seconds = max(int(math.ceil(remaining.total_seconds())), 0)
+            self.next_loop_remaining_var.set(self._format_countdown_seconds(seconds))
+        elif not (self.timelapse_thread and self.timelapse_thread.is_alive()) or not next_loop_deadline:
+            self.next_loop_remaining_var.set("-")
+
+    def _format_countdown_seconds(self, seconds):
+        seconds = max(0, int(seconds))
+        minutes, sec = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:d}:{minutes:02d}:{sec:02d}"
+        return f"{minutes:02d}:{sec:02d}"
 
     def _timelapse_site_z_target(self, position):
         if not getattr(self, "z_motion_enabled", False):
@@ -330,7 +494,7 @@ class TimelapseMixin:
             self.tango.move_absolute_xy(position.x, position.y)
             self.tango.wait_for_xy_stop(60000)
             self.update_stage_position_display()
-            self._set_var_async(self.current_site_var, f"Site: {position.name}")
+            self._set_var_async(self.current_site_var, position.name)
 
             dwell = float(self.stage_dwell_var.get())
             if dwell > 0:

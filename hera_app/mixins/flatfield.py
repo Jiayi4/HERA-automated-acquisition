@@ -1,5 +1,6 @@
 import array
 import os
+import re
 import threading
 import time
 import uuid
@@ -141,6 +142,11 @@ class FlatfieldMixin:
             }
 
         if sample_camera_roi and not flat_camera_roi:
+            if sample_source_width == flat_source_width and sample_source_height == flat_source_height:
+                sample_roi = sample_display_roi or (0, 0, sample_source_width, sample_source_height)
+                plan = make_plan(sample_roi, sample_roi, "matching-roi-source")
+                if plan:
+                    return plan
             camera_x, camera_y, camera_w, camera_h = sample_camera_roi
             if camera_w > 0 and camera_h > 0:
                 scale_x = sample_source_width / camera_w
@@ -381,6 +387,147 @@ class FlatfieldMixin:
                 self._safe_after(0, lambda: self.update_state("Error"))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _read_envi_brace_list(self, header_text, key):
+        match = re.search(rf"(?is)^\s*{re.escape(key)}\s*=\s*\{{(.*?)\}}", header_text, re.MULTILINE)
+        if not match:
+            return []
+        values = []
+        for token in re.split(r"[,\s]+", match.group(1).strip()):
+            if not token:
+                continue
+            try:
+                values.append(float(token))
+            except ValueError:
+                pass
+        return values
+
+    def _strip_envi_value(self, value):
+        text = str(value or "").strip()
+        if text.startswith("{") and text.endswith("}"):
+            text = text[1:-1].strip()
+        return text.strip('"')
+
+    def _load_envi_ref_metadata(self, hdr_path):
+        hdr_path = os.path.abspath(hdr_path)
+        if not os.path.exists(hdr_path):
+            raise RuntimeError(f"ENVI header does not exist: {hdr_path}")
+        if not hdr_path.lower().endswith(".hdr"):
+            raise RuntimeError("Choose the ENVI .hdr file for the saved _ref cube.")
+
+        header_text = Path(hdr_path).read_text(encoding="utf-8", errors="replace")
+        samples = int(self._read_envi_header_value(header_text, "samples"))
+        lines = int(self._read_envi_header_value(header_text, "lines"))
+        bands = int(self._read_envi_header_value(header_text, "bands"))
+        envi_data_type = int(self._read_envi_header_value(header_text, "data type"))
+        interleave = self._strip_envi_value(self._read_envi_header_value(header_text, "interleave", "bsq")).lower()
+        byte_order = int(self._read_envi_header_value(header_text, "byte order", "0"))
+        header_offset = int(self._read_envi_header_value(header_text, "header offset", "0"))
+        if interleave != "bsq":
+            raise RuntimeError(f"Imported flatfield supports ENVI bsq interleave only, not {interleave}.")
+        if byte_order != 0:
+            raise RuntimeError("Imported flatfield supports little-endian ENVI files only.")
+        if header_offset != 0:
+            raise RuntimeError("Imported flatfield supports ENVI files with header offset = 0 only.")
+        data_type_map = {4: 0, 5: 1}
+        if envi_data_type not in data_type_map:
+            raise RuntimeError(f"Imported flatfield supports ENVI data type 4/5 only, not {envi_data_type}.")
+
+        data_file_value = self._strip_envi_value(self._read_envi_header_value(header_text, "data file", ""))
+        if data_file_value:
+            data_path = data_file_value if os.path.isabs(data_file_value) else os.path.join(os.path.dirname(hdr_path), data_file_value)
+        else:
+            data_path = self._find_envi_data_file(hdr_path[:-4])
+        data_path = os.path.abspath(data_path)
+        if not os.path.exists(data_path):
+            raise RuntimeError(f"ENVI data file does not exist: {data_path}")
+
+        bytes_per_value = 4 if envi_data_type == 4 else 8
+        expected_bytes = samples * lines * bands * bytes_per_value
+        actual_bytes = os.path.getsize(data_path)
+        if actual_bytes < expected_bytes:
+            raise RuntimeError(
+                f"ENVI data file is smaller than expected ({actual_bytes} bytes < {expected_bytes} bytes)."
+            )
+
+        wavelengths = self._read_envi_brace_list(header_text, "wavelength")
+        if len(wavelengths) != bands:
+            wavelengths = [float(index) for index in range(bands)]
+
+        app_data_type = data_type_map[envi_data_type]
+        roi = (0, 0, samples, lines)
+        return {
+            "handle": f"owned-imported-flatfield:{time.time():.6f}",
+            "info": {
+                "width": samples,
+                "height": lines,
+                "source_width": samples,
+                "source_height": lines,
+                "display_roi": roi,
+                "camera_roi": None,
+                "export_roi": roi,
+                "bands": bands,
+                "data_type": app_data_type,
+                "is_hdr": None,
+                "role": "flatfield",
+                "storage": "owned",
+                "owned_data_role": "flatfield",
+                "owned_storage_kind": "file",
+                "owned_file_path": data_path,
+                "imported_ref_hdr_path": hdr_path,
+            },
+            "data": {
+                "file_path": data_path,
+                "wavelengths": wavelengths,
+                "storage_kind": "file",
+                "width": samples,
+                "height": lines,
+                "data_type": app_data_type,
+                "role": "flatfield",
+            },
+        }
+
+    def import_flatfield_reference(self):
+        from tkinter import filedialog
+
+        initial_dir = self.param_vars["output_path"].get().strip() if "output_path" in self.param_vars else self.default_output_dir
+        hdr_path = filedialog.askopenfilename(
+            title="Import saved flatfield reference",
+            initialdir=initial_dir if os.path.isdir(initial_dir) else self.default_output_dir,
+            filetypes=(("ENVI header", "*.hdr"), ("All files", "*.*")),
+        )
+        if not hdr_path:
+            return
+        try:
+            imported = self._load_envi_ref_metadata(hdr_path)
+            previous_flatfield = self.flatfield_hypercube_handle
+            if (
+                previous_flatfield
+                and self.controller
+                and not self._is_owned_cube_info(self.flatfield_info)
+            ):
+                try:
+                    with self.hypercube_read_lock:
+                        self.controller.release_hypercube(previous_flatfield)
+                except Exception as exc:
+                    self.log(f"Could not release previous flatfield before import: {exc}")
+            self.flatfield_hypercube_handle = imported["handle"]
+            self.flatfield_info = imported["info"]
+            self.flatfield_hypercube_data = imported["data"]
+            width = int(self.flatfield_info.get("width", 0) or 0)
+            height = int(self.flatfield_info.get("height", 0) or 0)
+            bands = int(self.flatfield_info.get("bands", 0) or 0)
+            self.flatfield_status_var.set(f"imported ({width} x {height}, bands={bands})")
+            self.current_hyper_band_cache = {}
+            self.current_hyper_spectrum_cache = {}
+            self.current_hyper_pointer_cache = {}
+            self.hyper_flatfield_spectrum = None
+            self.log(f"Imported flatfield reference: {hdr_path}")
+            self._refresh_export_controls_for_display_mode()
+            self.render_current_hyper_band()
+        except Exception as exc:
+            self.log(f"Failed to import flatfield reference: {exc}")
+            self.update_state("Error")
 
     def use_current_sample_as_flatfield(self):
         if not self.current_hypercube_handle or not self.current_hypercube_info:

@@ -720,7 +720,7 @@ class LiveViewMixin:
 
     def on_live_gamma_change(self, _value=None):
         gamma = self._get_live_display_gamma()
-        self.live_gamma_label_var.set(f"Gamma Value {gamma:.1f}")
+        self.live_gamma_label_var.set(f"Gamma {gamma:.1f}")
         self._schedule_live_render(force=True)
 
     def reset_live_gamma(self):
@@ -817,6 +817,7 @@ class LiveViewMixin:
         from tkinter import messagebox
         with self.live_frame_lock:
             frame = self.latest_live_frame
+            frame_info = self.live_frame_info
         if not frame:
             messagebox.showinfo("Live Snapshot", "Start live view first, then take a snapshot.")
             return
@@ -827,6 +828,25 @@ class LiveViewMixin:
             src_width, src_height, gray_bytes = frame
             saturation_mask = None
 
+        roi = self._normalize_roi_tuple(self._get_active_roi())
+        if roi:
+            frame_width = src_width
+            frame_height = src_height
+            if frame_info and len(frame_info) >= 2:
+                frame_width, frame_height = int(frame_info[0]), int(frame_info[1])
+            rx, ry, rw, rh = roi
+            gray_bytes, saturation_mask, src_width, src_height, _cx, _cy = self._crop_live_frame_bytes(
+                gray_bytes,
+                saturation_mask,
+                src_width,
+                src_height,
+                frame_width,
+                frame_height,
+                rx,
+                ry,
+                rw,
+                rh,
+            )
         render_bytes = self._prepare_live_display_bytes(gray_bytes)
         render_mask = saturation_mask if self.live_show_saturation_var.get() else None
         render_bytes, display_width, display_height, render_mask = self._orient_live_display_bytes(
@@ -867,7 +887,8 @@ class LiveViewMixin:
             self.log(f"Live snapshot failed: {exc}")
             return
 
-        self.log(f"Live snapshot saved: {snapshot_path}")
+        roi_note = f" using ROI {self._format_roi_short(roi)}" if roi else ""
+        self.log(f"Live snapshot saved{roi_note}: {snapshot_path}")
         self._set_live_view_status(f"Live snapshot saved: {os.path.basename(snapshot_path)}")
 
     def _draw_live_view_placeholder(self):
@@ -1110,20 +1131,6 @@ class LiveViewMixin:
         else:
             self._maybe_initialize_roi_fields_from_live_frame(frame_width, frame_height)
         canvas.create_image(left + out_w / 2, top + out_h / 2, image=self.live_photo, anchor="center")
-        if frame_info:
-            w, h, bit_depth, bits_per_pixel = self._live_frame_info_parts(frame_info)
-            if bit_depth and bits_per_pixel and bit_depth != bits_per_pixel:
-                bit_text = f"{bit_depth}-bit data / {bits_per_pixel}-bit storage"
-            else:
-                bit_text = f"{bits_per_pixel or bit_depth}-bit"
-            canvas.create_text(
-                12,
-                12,
-                anchor="nw",
-                text=f"Live frame: {w} x {h}  |  {bit_text}  |  {self.live_pixel_format_name}",
-                fill="#e7edf5",
-                font=("Segoe UI", 9),
-            )
         self._draw_live_roi_overlay(canvas)
         self._draw_live_cross_overlay(canvas)
         self._render_live_profiles()

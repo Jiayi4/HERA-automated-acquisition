@@ -135,7 +135,7 @@ class ThemeMixin:
 
     def _is_primary_button(self, widget):
         try:
-            return widget.cget("text") == "Start Timelapse"
+            return widget.cget("text") in {"Start Timelapse", "Run Timelapse"}
         except Exception:
             return False
 

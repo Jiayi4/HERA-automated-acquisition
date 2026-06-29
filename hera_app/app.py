@@ -71,7 +71,7 @@ class HeraTriggerApp(
     HDR_DYNAMIC_RANGE_TEXT = "Dynamic Range 16-bit HDR"
     HDR_DYNAMIC_RANGE_SHORT_TEXT = "Dynamic Range HDR"
     HDR_SENSITIVITY_TEXT = "Sensitivity 12-bit"
-    HDR_CHECKBOX_TEXT = "Dynamic Range (16-bit HDR)"
+    HDR_CHECKBOX_TEXT = "16-bit HDR"
 
     @classmethod
     def hdr_mode_text(cls, enabled, short=False):
@@ -103,7 +103,7 @@ class HeraTriggerApp(
         self.ui_call_queue = queue.Queue()
         self.ui_queue_poll_job = None
         self.ui_queue_poll_interval_ms = 25
-        self.title("Hera + Tango Trigger Control")
+        self.title("Hyperspectral Scanning Acquisition APP")
         self.geometry("1400x900")
         self.minsize(1240, 800)
         self.theme_mode = "dark"
@@ -129,6 +129,7 @@ class HeraTriggerApp(
         self.timelapse_pause_event = threading.Event()
         self.timelapse_run_id = 0
         self.timelapse_roi = None
+        self.next_loop_deadline = None
         self.acquisition_inflight = False
         self.stage_motion_inflight = False
         self.acquisition_watchdog_token = 0
@@ -149,9 +150,10 @@ class HeraTriggerApp(
         self.stage_interface_var = tk.StringVar(value="RS232 / COM")
         self.timelapse_status_var = tk.StringVar(value="Timelapse: idle")
         self.time_remaining_var = tk.StringVar(value="Time remaining: -")
+        self.next_loop_remaining_var = tk.StringVar(value="-")
         self.center_stage_summary_var = tk.StringVar(value="Selected position: none")
-        self.current_cycle_var = tk.StringVar(value="Cycle: -")
-        self.current_site_var = tk.StringVar(value="Site: -")
+        self.current_cycle_var = tk.StringVar(value="-")
+        self.current_site_var = tk.StringVar(value="-")
         self.last_export_var = tk.StringVar(value="Last export: -")
         self.run_progress_var = tk.DoubleVar(value=0.0)
         self.run_progress_text_var = tk.StringVar(value="Progress: idle")
@@ -193,7 +195,7 @@ class HeraTriggerApp(
         self.live_profile_status_var = tk.StringVar(value="Cross: center")
         self.live_cross_point = None
         self.live_gamma_var = tk.DoubleVar(value=1.0)
-        self.live_gamma_label_var = tk.StringVar(value="Gamma Value 1.0")
+        self.live_gamma_label_var = tk.StringVar(value="Gamma 1.0")
         self.live_zoom_factor = 1.0
         self.live_zoom_label_var = tk.StringVar(value="Zoom 100%")
         self.live_pan_x = 0.0
@@ -293,6 +295,7 @@ class HeraTriggerApp(
         self.pending_acquisition_auto_save = True
         self.save_pending_button = None
         self.flatfield_acquire_button = None
+        self.flatfield_import_button = None
         self.flatfield_use_current_button = None
         self.flatfield_clear_button = None
         self.start_acquisition_buttons = []
@@ -346,6 +349,18 @@ class HeraTriggerApp(
 
     def _log_timestamp(self):
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _visible_log_timestamp(self):
+        return datetime.now().strftime("%H:%M:%S")
+
+    def _visible_log_entry(self, message):
+        return f"{self._visible_log_timestamp()}  {message}"
+
+    def _compact_visible_log_line(self, message, max_chars=180):
+        text = str(message).strip()
+        if len(text) <= max_chars:
+            return text
+        return f"{text[: max_chars - 3]}..."
 
     def _rotate_log_if_large(self, path, max_bytes=8 * 1024 * 1024):
         try:
@@ -516,12 +531,13 @@ class HeraTriggerApp(
     def _log_unhandled_exception(self, title, exc_type, exc_value, exc_traceback):
         trace_text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
         summary = f"{title}: {exc_value}"
+        visible_summary = self._visible_log_entry(summary)
         self._write_log_file_lines(self.detail_log_path, [summary, trace_text])
-        self.detail_log_messages.append((summary, False))
+        self.detail_log_messages.append((visible_summary, False))
         self._record_recent_issue(summary, trace_text)
         try:
             if hasattr(self, "log_text") and self.log_text.winfo_exists():
-                self._append_visible_log_line(summary)
+                self._append_visible_log_line(visible_summary)
         except Exception:
             pass
 
@@ -590,7 +606,8 @@ class HeraTriggerApp(
 
     def _append_visible_log_line(self, message):
         self.log_text.config(state="normal")
-        self.log_text.insert("end", f"{message}\n")
+        for line in str(message).splitlines() or [""]:
+            self.log_text.insert("end", f"{self._compact_visible_log_line(line)}\n")
         self.log_text.see("end")
         self.log_text.config(state="disabled")
 
@@ -602,21 +619,23 @@ class HeraTriggerApp(
         self.log_text.delete("1.0", "end")
         for text, is_detail in self.detail_log_messages:
             if show_details or not is_detail:
-                self.log_text.insert("end", f"{text}\n")
+                for line in str(text).splitlines() or [""]:
+                    self.log_text.insert("end", f"{self._compact_visible_log_line(line)}\n")
         self.log_text.see("end")
         self.log_text.config(state="disabled")
 
     def log(self, message, detail=None):
         text = str(message)
         is_detail = (not self._is_essential_log_message(text)) if detail is None else bool(detail)
-        self.detail_log_messages.append((text, is_detail))
+        visible_text = self._visible_log_entry(text)
+        self.detail_log_messages.append((visible_text, is_detail))
         self._write_detail_log_line(text)
         if self._is_issue_log_message(text):
             self._record_recent_issue(text)
         if not hasattr(self, "log_text"):
             return
         if self.show_detail_log_var.get() or not is_detail:
-            self._append_visible_log_line(text)
+            self._append_visible_log_line(visible_text)
 
     def on_close(self):
         if self.is_closing:
