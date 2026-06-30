@@ -7,6 +7,7 @@ This repo controls the HERA camera/stage app and the NIS-Elements Z-axis bridge.
 - Preserve user changes. Do not reset or revert the repo unless the user explicitly asks.
 - Keep meaningful fixes committed/pushed to GitHub when the user asks to publish or when NIS-side files need deployment.
 - `AppHeraTriggerPython0417.py` is only the launcher. Do not put app logic there.
+- The app should run from the tracked `hera-trigger-app\hera_app` package. Do not recreate or sync a parent-folder `hera_app` runtime mirror unless the user explicitly asks to restore that legacy setup.
 - After every code change, tell the user exactly how to verify it: concrete app actions, expected results, and logs/files to inspect. If hardware testing was not possible locally, say that clearly.
 
 ## App Structure

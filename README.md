@@ -119,9 +119,14 @@ The following are still specific to the target installation:
 
 ## Run
 
+From the repository folder:
+
 ```powershell
+cd "C:\BIOS DATA\Lina\PYTHON\hera-trigger-app"
 python AppHeraTriggerPython0417.py
 ```
+
+The parent-folder launcher at `C:\BIOS DATA\Lina\PYTHON\AppHeraTriggerPython0417.py` also delegates to this repository folder. The app should run from the tracked `hera-trigger-app\hera_app` package; a separate parent-folder `hera_app` runtime mirror is not required.
 
 ## Typical Workflow
 
