@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Soft Palette Options - Hyperspectral Scanning Acquisition APP</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 22px;
+      background: #eef2f6;
+      color: #172033;
+      font-family: "Segoe UI", Inter, Arial, sans-serif;
+    }
+    header {
+      max-width: 1540px;
+      margin: 0 auto 16px;
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 22px;
+      letter-spacing: 0;
+    }
+    .note {
+      margin: 0;
+      color: #667085;
+      font-size: 13px;
+    }
+    .grid {
+      max-width: 1540px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .option {
+      border: 1px solid #cfd8e5;
+      background: #f8fafc;
+      box-shadow: 0 14px 36px rgba(16, 24, 40, 0.12);
+    }
+    .option-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-bottom: 1px solid #d8e0ea;
+      background: #ffffff;
+    }
+    .option h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .option-desc {
+      margin: 2px 0 0;
+      color: #667085;
+      font-size: 12px;
+    }
+    .swatches {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
+      color: #667085;
+    }
+    .swatch {
+      width: 24px;
+      height: 24px;
+      border: 1px solid rgba(0, 0, 0, 0.14);
+    }
+    .mock {
+      --bg: #111316;
+      --panel: #171a1f;
+      --section: #1b2026;
+      --sub: #20262d;
+      --field: #0d0f12;
+      --line: #303842;
+      --line-strong: #47515e;
+      --text: #eef2f7;
+      --muted: #94a3b8;
+      --canvas: #080c12;
+      --blue: #5b82b6;
+      --blue-active: #6f94c7;
+      --orange: #c47b45;
+      --orange-active: #d38b57;
+      --ok: #65c68a;
+      display: grid;
+      grid-template-columns: 190px minmax(280px, 1fr) 210px;
+      grid-template-rows: 42px 1fr 116px;
+      gap: 8px;
+      min-height: 520px;
+      padding: 10px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .option-b .mock {
+      --bg: #10151b;
+      --panel: #181e25;
+      --section: #1f2730;
+      --sub: #242d37;
+      --field: #0f141a;
+      --line: #333d49;
+      --line-strong: #4b5867;
+      --blue: #4e8aa8;
+      --blue-active: #68a2bf;
+      --orange: #bd8354;
+      --orange-active: #ce9569;
+    }
+    .option-c .mock {
+      --bg: #121417;
+      --panel: #191d22;
+      --section: #20262b;
+      --sub: #262d33;
+      --field: #0f1114;
+      --line: #343b43;
+      --line-strong: #4c5661;
+      --blue: #647fa5;
+      --blue-active: #7892b6;
+      --orange: #b97959;
+      --orange-active: #c98b6d;
+    }
+    .option-d .mock {
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --section: #f7f9fc;
+      --sub: #eef3f8;
+      --field: #ffffff;
+      --line: #cfd8e5;
+      --line-strong: #aebdcd;
+      --text: #182230;
+      --muted: #667085;
+      --canvas: #f8fafc;
+      --blue: #426fa8;
+      --blue-active: #315f98;
+      --orange: #aa7442;
+      --orange-active: #935f32;
+      --ok: #2f855a;
+    }
+    .titlebar {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 8px;
+      background: var(--bg);
+    }
+    .app-title {
+      font-weight: 700;
+      font-size: 14px;
+    }
+    .small-btn,
+    .btn {
+      border: 1px solid var(--line);
+      background: var(--sub);
+      color: var(--text);
+      padding: 5px 8px;
+      font-size: 11px;
+      border-radius: 3px;
+    }
+    .btn.blue {
+      background: var(--blue);
+      border-color: var(--blue-active);
+      color: #fff;
+    }
+    .btn.orange {
+      background: var(--orange);
+      border-color: var(--orange-active);
+      color: #111827;
+      font-weight: 700;
+    }
+    .option-d .btn.orange { color: #fff; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 8px;
+      overflow: hidden;
+    }
+    .panel h3 {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 4px 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--line), transparent 45%);
+      font-size: 11px;
+    }
+    .row:last-child { border-bottom: 0; }
+    .label { color: var(--muted); }
+    .value { color: var(--text); }
+    .value.ok { color: var(--ok); font-weight: 700; }
+    .field {
+      min-width: 52px;
+      padding: 3px 5px;
+      background: var(--field);
+      border: 1px solid var(--line);
+      color: var(--text);
+      text-align: right;
+      font-size: 11px;
+    }
+    .left,
+    .right {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+    .center {
+      display: grid;
+      grid-template-rows: 44px 1fr;
+      gap: 8px;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 7px;
+      font-size: 11px;
+    }
+    .image-area {
+      position: relative;
+      display: grid;
+      grid-template-columns: 1fr 70px;
+      grid-template-rows: 1fr 70px;
+      gap: 6px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 7px;
+    }
+    .image {
+      grid-row: 1;
+      grid-column: 1;
+      background:
+        radial-gradient(circle at 28% 28%, color-mix(in srgb, var(--blue), transparent 68%) 0 12%, transparent 13%),
+        radial-gradient(circle at 70% 30%, color-mix(in srgb, var(--orange), transparent 72%) 0 11%, transparent 12%),
+        linear-gradient(135deg, color-mix(in srgb, var(--blue), transparent 84%), transparent 38%),
+        var(--canvas);
+      border: 1px solid var(--line);
+      min-height: 280px;
+    }
+    .profile-v,
+    .profile-h {
+      background:
+        repeating-linear-gradient(90deg, transparent 0 11px, color-mix(in srgb, var(--orange), transparent 72%) 12px 13px),
+        var(--field);
+      border: 1px solid var(--line);
+    }
+    .profile-v { grid-column: 2; grid-row: 1; }
+    .profile-h { grid-column: 1; grid-row: 2; }
+    .status {
+      grid-column: 1 / -1;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 8px;
+    }
+    .status-strip {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .status-strip strong { color: var(--ok); }
+    .bar {
+      height: 8px;
+      margin: 7px 0;
+      background: var(--field);
+      border: 1px solid var(--line);
+    }
+    .bar div {
+      width: 58%;
+      height: 100%;
+      background: var(--blue);
+    }
+    .console {
+      color: var(--muted);
+      font-size: 11px;
+    }
+    @media (max-width: 1100px) {
+      .grid { grid-template-columns: 1fr; }
+      .mock { grid-template-columns: 170px 1fr 190px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Soft Blue / Orange Palette Options</h1>
+    <p class="note">Four less-saturated palette directions for the current scientific UI. These are previews only; the APP theme is not changed yet.</p>
+  </header>
+
+  <main class="grid">
+    <section class="option option-a">
+      <div class="option-head">
+        <div>
+          <h2>A. Muted Instrument</h2>
+          <p class="option-desc">Closest to current design, but blue/orange are softened.</p>
+        </div>
+        <div class="swatches"><span>#5B82B6</span><span class="swatch" style="background:#5b82b6"></span><span class="swatch" style="background:#c47b45"></span><span>#C47B45</span></div>
+      </div>
+      <div class="mock">
+        <div class="titlebar"><span class="app-title">Hyperspectral Scanning Acquisition APP</span><button class="small-btn">Light Mode</button></div>
+        <div class="left">
+          <div class="panel"><h3>Status</h3><div class="row"><span class="label">License</span><span class="value">Licensed</span></div><div class="row"><span class="label">Last export</span><span class="value">sample_001_nrm</span></div></div>
+          <div class="panel"><h3>Parameters</h3><div class="row"><span class="label">Exposure</span><span class="field">3.0</span></div><div class="row"><span class="label">16-bit HDR</span><span class="value ok">on</span></div></div>
+          <div class="panel"><h3>ROI</h3><div class="row"><span class="label">Active ROI</span><span class="value ok">w=1583 h=1590</span></div></div>
+        </div>
+        <div class="center">
+          <div class="controls"><button class="btn blue">Set</button><span class="label">Bands</span><span class="field">1300</span><span class="label">Data</span><span class="field">SinglePrecision</span></div>
+          <div class="image-area"><div class="image"></div><div class="profile-v"></div><div class="profile-h"></div></div>
+        </div>
+        <div class="right">
+          <div class="panel"><h3>Acquisition</h3><button class="btn blue">Start Single Acquisition</button><button class="btn">Abort Acquisition</button><button class="btn orange">Run Timelapse</button></div>
+          <div class="panel"><h3>Export</h3><div class="row"><span class="label">raw</span><span class="value ok">checked</span></div><div class="row"><span class="label">ref</span><span class="value">off</span></div><div class="row"><span class="label">norm</span><span class="value ok">checked</span></div></div>
+        </div>
+        <div class="status"><div class="status-strip"><strong>Ready</strong><span>| Site: 1</span><span>| Cycle: 3</span><span>| Next loop: 07:42</span><span>| Total run time: 1:18:09</span></div><div class="bar"><div></div></div><div class="console">Saving norm... 58%</div></div>
+      </div>
+    </section>
+
+    <section class="option option-b">
+      <div class="option-head">
+        <div>
+          <h2>B. Teal Blue / Amber</h2>
+          <p class="option-desc">Cooler blue, warmer amber; slightly more calm in dark mode.</p>
+        </div>
+        <div class="swatches"><span>#4E8AA8</span><span class="swatch" style="background:#4e8aa8"></span><span class="swatch" style="background:#bd8354"></span><span>#BD8354</span></div>
+      </div>
+      <div class="mock">
+        <div class="titlebar"><span class="app-title">Hyperspectral Scanning Acquisition APP</span><button class="small-btn">Light Mode</button></div>
+        <div class="left"><div class="panel"><h3>Status</h3><div class="row"><span class="label">License</span><span class="value">Licensed</span></div><div class="row"><span class="label">Last export</span><span class="value">sample_001_nrm</span></div></div><div class="panel"><h3>Parameters</h3><div class="row"><span class="label">Exposure</span><span class="field">3.0</span></div><div class="row"><span class="label">16-bit HDR</span><span class="value ok">on</span></div></div><div class="panel"><h3>ROI</h3><div class="row"><span class="label">Active ROI</span><span class="value ok">w=1583 h=1590</span></div></div></div>
+        <div class="center"><div class="controls"><button class="btn blue">Set</button><span class="label">Bands</span><span class="field">1300</span><span class="label">Data</span><span class="field">SinglePrecision</span></div><div class="image-area"><div class="image"></div><div class="profile-v"></div><div class="profile-h"></div></div></div>
+        <div class="right"><div class="panel"><h3>Acquisition</h3><button class="btn blue">Start Single Acquisition</button><button class="btn">Abort Acquisition</button><button class="btn orange">Run Timelapse</button></div><div class="panel"><h3>Export</h3><div class="row"><span class="label">raw</span><span class="value ok">checked</span></div><div class="row"><span class="label">ref</span><span class="value">off</span></div><div class="row"><span class="label">norm</span><span class="value ok">checked</span></div></div></div>
+        <div class="status"><div class="status-strip"><strong>Ready</strong><span>| Site: 1</span><span>| Cycle: 3</span><span>| Next loop: 07:42</span><span>| Total run time: 1:18:09</span></div><div class="bar"><div></div></div><div class="console">Saving norm... 58%</div></div>
+      </div>
+    </section>
+
+    <section class="option option-c">
+      <div class="option-head">
+        <div>
+          <h2>C. Slate Blue / Copper</h2>
+          <p class="option-desc">Most subdued dark option; good if the UI still feels too bright.</p>
+        </div>
+        <div class="swatches"><span>#647FA5</span><span class="swatch" style="background:#647fa5"></span><span class="swatch" style="background:#b97959"></span><span>#B97959</span></div>
+      </div>
+      <div class="mock">
+        <div class="titlebar"><span class="app-title">Hyperspectral Scanning Acquisition APP</span><button class="small-btn">Light Mode</button></div>
+        <div class="left"><div class="panel"><h3>Status</h3><div class="row"><span class="label">License</span><span class="value">Licensed</span></div><div class="row"><span class="label">Last export</span><span class="value">sample_001_nrm</span></div></div><div class="panel"><h3>Parameters</h3><div class="row"><span class="label">Exposure</span><span class="field">3.0</span></div><div class="row"><span class="label">16-bit HDR</span><span class="value ok">on</span></div></div><div class="panel"><h3>ROI</h3><div class="row"><span class="label">Active ROI</span><span class="value ok">w=1583 h=1590</span></div></div></div>
+        <div class="center"><div class="controls"><button class="btn blue">Set</button><span class="label">Bands</span><span class="field">1300</span><span class="label">Data</span><span class="field">SinglePrecision</span></div><div class="image-area"><div class="image"></div><div class="profile-v"></div><div class="profile-h"></div></div></div>
+        <div class="right"><div class="panel"><h3>Acquisition</h3><button class="btn blue">Start Single Acquisition</button><button class="btn">Abort Acquisition</button><button class="btn orange">Run Timelapse</button></div><div class="panel"><h3>Export</h3><div class="row"><span class="label">raw</span><span class="value ok">checked</span></div><div class="row"><span class="label">ref</span><span class="value">off</span></div><div class="row"><span class="label">norm</span><span class="value ok">checked</span></div></div></div>
+        <div class="status"><div class="status-strip"><strong>Ready</strong><span>| Site: 1</span><span>| Cycle: 3</span><span>| Next loop: 07:42</span><span>| Total run time: 1:18:09</span></div><div class="bar"><div></div></div><div class="console">Saving norm... 58%</div></div>
+      </div>
+    </section>
+
+    <section class="option option-d">
+      <div class="option-head">
+        <div>
+          <h2>D. Soft Light Mode Pair</h2>
+          <p class="option-desc">Light-mode counterpart with restrained blue/orange.</p>
+        </div>
+        <div class="swatches"><span>#426FA8</span><span class="swatch" style="background:#426fa8"></span><span class="swatch" style="background:#aa7442"></span><span>#AA7442</span></div>
+      </div>
+      <div class="mock">
+        <div class="titlebar"><span class="app-title">Hyperspectral Scanning Acquisition APP</span><button class="small-btn">Dark Mode</button></div>
+        <div class="left"><div class="panel"><h3>Status</h3><div class="row"><span class="label">License</span><span class="value">Licensed</span></div><div class="row"><span class="label">Last export</span><span class="value">sample_001_nrm</span></div></div><div class="panel"><h3>Parameters</h3><div class="row"><span class="label">Exposure</span><span class="field">3.0</span></div><div class="row"><span class="label">16-bit HDR</span><span class="value ok">on</span></div></div><div class="panel"><h3>ROI</h3><div class="row"><span class="label">Active ROI</span><span class="value ok">w=1583 h=1590</span></div></div></div>
+        <div class="center"><div class="controls"><button class="btn blue">Set</button><span class="label">Bands</span><span class="field">1300</span><span class="label">Data</span><span class="field">SinglePrecision</span></div><div class="image-area"><div class="image"></div><div class="profile-v"></div><div class="profile-h"></div></div></div>
+        <div class="right"><div class="panel"><h3>Acquisition</h3><button class="btn blue">Start Single Acquisition</button><button class="btn">Abort Acquisition</button><button class="btn orange">Run Timelapse</button></div><div class="panel"><h3>Export</h3><div class="row"><span class="label">raw</span><span class="value ok">checked</span></div><div class="row"><span class="label">ref</span><span class="value">off</span></div><div class="row"><span class="label">norm</span><span class="value ok">checked</span></div></div></div>
+        <div class="status"><div class="status-strip"><strong>Ready</strong><span>| Site: 1</span><span>| Cycle: 3</span><span>| Next loop: 07:42</span><span>| Total run time: 1:18:09</span></div><div class="bar"><div></div></div><div class="console">Saving norm... 58%</div></div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

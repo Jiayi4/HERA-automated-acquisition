@@ -136,12 +136,21 @@ class LiveViewMixin:
     def _set_live_view_status(self, text):
         if self.is_closing:
             return
-        if self.live_view_status_var.get() == text:
+        display_text = self._format_live_view_status_text(text)
+        if self.live_view_status_var.get() == display_text:
             return
         if threading.current_thread() is threading.main_thread():
-            self.live_view_status_var.set(text)
+            self.live_view_status_var.set(display_text)
         else:
-            self._safe_after(0, lambda: self.live_view_status_var.set(text))
+            self._safe_after(0, lambda: self.live_view_status_var.set(display_text))
+
+    def _format_live_view_status_text(self, text):
+        display_text = str(text or "").strip()
+        if display_text.lower().startswith("live view:"):
+            display_text = display_text.split(":", 1)[1].strip()
+        if not display_text:
+            return "-"
+        return display_text[:1].upper() + display_text[1:]
 
     def _schedule_live_render(self, force=False):
         if self.is_closing:

@@ -16,13 +16,14 @@ class ThemeMixin:
                 "field": "#0d0f12",
                 "border": "#303842",
                 "border_strong": "#47515e",
+                "view_border": "#303842",
                 "text": "#eef2f7",
                 "muted": "#94a3b8",
-                "accent": "#2f7df6",
-                "accent_active": "#4f91ff",
-                "accent_soft": "#8bb8ff",
-                "accent_orange": "#f28b2e",
-                "accent_orange_active": "#ff9f4f",
+                "accent": "#3f7fe2",
+                "accent_active": "#5a93ee",
+                "accent_soft": "#8eb6f5",
+                "accent_orange": "#df8138",
+                "accent_orange_active": "#ee9452",
                 "success": "#65d28b",
                 "danger": "#ef6b6b",
                 "canvas": "#080c12",
@@ -44,13 +45,14 @@ class ThemeMixin:
                 "field": "#ffffff",
                 "border": "#cfd8e5",
                 "border_strong": "#aebdcd",
+                "view_border": "#bdd2ee",
                 "text": "#182230",
                 "muted": "#667085",
-                "accent": "#256fe8",
-                "accent_active": "#1d5fd0",
-                "accent_soft": "#3f7fe8",
-                "accent_orange": "#d97728",
-                "accent_orange_active": "#c96820",
+                "accent": "#326fd3",
+                "accent_active": "#275fbf",
+                "accent_soft": "#5689df",
+                "accent_orange": "#c9732f",
+                "accent_orange_active": "#b76626",
                 "success": "#25834f",
                 "danger": "#b93838",
                 "canvas": "#f8fafc",
@@ -94,26 +96,57 @@ class ThemeMixin:
             foreground=[("selected", self.theme["accent_text"])],
         )
         style.configure("Dark.TSeparator", background=self.theme["border"])
-        style.configure("TNotebook", background=self.theme["bg"], borderwidth=0, tabmargins=[0, 0, 0, 0])
+        view_border = self.theme.get("view_border", self.theme["border"])
+        style.configure(
+            "TNotebook",
+            background=self.theme["bg"],
+            borderwidth=0,
+            tabmargins=[0, 0, 0, 0],
+            relief="flat",
+            lightcolor=view_border,
+            darkcolor=view_border,
+            bordercolor=view_border,
+        )
         style.configure(
             "TNotebook.Tab",
             background=self.theme["panel_alt"],
             foreground=self.theme["muted"],
             padding=[9, 4],
             font=("Segoe UI", 9),
+            borderwidth=1,
+            relief="flat",
+            lightcolor=view_border,
+            darkcolor=view_border,
+            bordercolor=view_border,
+            focuscolor=view_border,
         )
         style.map(
             "TNotebook.Tab",
             background=[("selected", self.theme["panel"]), ("active", self.theme["panel_section"])],
             foreground=[("selected", self.theme["text"]), ("active", self.theme["text"])],
         )
-        style.configure("Left.TNotebook", background=self.theme["bg"], borderwidth=0, tabmargins=[0, 0, 0, 0])
+        style.configure(
+            "Left.TNotebook",
+            background=self.theme["bg"],
+            borderwidth=0,
+            tabmargins=[0, 0, 0, 0],
+            relief="flat",
+            lightcolor=self.theme["bg"],
+            darkcolor=self.theme["bg"],
+            bordercolor=self.theme["bg"],
+        )
         style.configure(
             "Left.TNotebook.Tab",
             background=self.theme["panel_alt"],
             foreground=self.theme["muted"],
             padding=[9, 4],
             font=("Segoe UI", 9),
+            borderwidth=1,
+            relief="flat",
+            lightcolor=self.theme["border"],
+            darkcolor=self.theme["border"],
+            bordercolor=self.theme["border"],
+            focuscolor=self.theme["border"],
         )
         style.map(
             "Left.TNotebook.Tab",
@@ -155,13 +188,13 @@ class ThemeMixin:
         self.option_add("*LabelFrame.Foreground", self.theme["section_text"])
         self.option_add("*LabelFrame.BorderWidth", 1)
         self.option_add("*LabelFrame.HighlightThickness", 1)
-        self.option_add("*LabelFrame.HighlightBackground", self.theme["border_strong"])
+        self.option_add("*LabelFrame.HighlightBackground", self.theme["border"])
         self.option_add("*Button.Background", self.theme["button_bg"])
         self.option_add("*Button.Foreground", self.theme["text"])
         self.option_add("*Button.Relief", "flat")
         self.option_add("*Button.BorderWidth", 1)
         self.option_add("*Button.HighlightThickness", 1)
-        self.option_add("*Button.HighlightBackground", self.theme["border_strong"])
+        self.option_add("*Button.HighlightBackground", self.theme["border"])
         self.option_add("*Button.HighlightColor", self.theme["accent"])
         self.option_add("*Button.DisabledForeground", self.theme["muted"])
         self.option_add("*Entry.Background", self.theme["field"])
@@ -310,11 +343,13 @@ class ThemeMixin:
             elif cls == "Panedwindow":
                 widget.configure(bg=self.theme["bg"], sashrelief="flat")
             elif cls == "Canvas":
-                widget.configure(bg=self.theme["canvas"], highlightbackground=self.theme["border"], highlightcolor=self.theme["border"])
+                view_border = self.theme.get("view_border", self.theme["border"])
+                widget.configure(bg=self.theme["canvas"], highlightbackground=view_border, highlightcolor=view_border)
             elif cls == "Label":
                 widget.configure(bg=self._container_bg_for_widget(widget), fg=self._label_role_color(widget))
             elif cls == "Button":
                 bg, fg, active_bg, active_fg = self._button_colors(widget)
+                control_bar_button = bool(getattr(widget, "_hera_control_bar_button", False))
                 widget.configure(
                     bg=bg,
                     fg=fg,
@@ -325,8 +360,8 @@ class ThemeMixin:
                     highlightthickness=1,
                     highlightbackground=self.theme["border"],
                     highlightcolor=self.theme["accent"],
-                    padx=6,
-                    pady=2,
+                    padx=4 if control_bar_button else 6,
+                    pady=1 if control_bar_button else 2,
                     cursor="hand2",
                     disabledforeground=self.theme["muted"],
                 )

@@ -24,7 +24,7 @@ class UIBuilderMixin:
         center = tk.Frame(body, bg=self.theme["bg"], padx=6)
         center.grid_rowconfigure(1, weight=1)
         center.grid_columnconfigure(0, weight=1)
-        body.add(center, minsize=560, stretch="always")
+        body.add(center, minsize=650, stretch="always")
 
         right = self._make_scroll_column(body, width=260)
         body.add(right, minsize=210, width=260, stretch="never")
@@ -38,7 +38,6 @@ class UIBuilderMixin:
     def _make_scroll_column(self, parent, width):
         outer = tk.Frame(parent, bg=self.theme["bg"])
         scroll = ttk.Scrollbar(outer, orient="vertical")
-        scroll.pack(side="right", fill="y")
         canvas = tk.Canvas(outer, bg=self.theme["bg"], highlightthickness=0, width=width, yscrollcommand=scroll.set)
         canvas.pack(side="left", fill="both", expand=True)
         scroll.config(command=canvas.yview)
@@ -391,7 +390,7 @@ class UIBuilderMixin:
             roi_status,
             textvariable=self.live_roi_status_value_var,
             fg=self.theme["muted"],
-            wraplength=145,
+            wraplength=0,
             justify="left",
             anchor="w",
         )
@@ -403,29 +402,42 @@ class UIBuilderMixin:
         tk.Button(advanced, text="Preflight", command=self.preflight_check).pack(fill="x", pady=(0, 3))
         tk.Button(advanced, text="Disconnect Hera", command=self.disconnect_hera_async).pack(fill="x")
 
-        xyz = tk.LabelFrame(stage_tab, text="XY Position", padx=6, pady=5)
+        xyz = tk.LabelFrame(stage_tab, text="Status", padx=6, pady=5)
         xyz.pack(fill="x", pady=(0, 6))
         xyz.grid_columnconfigure(0, weight=1)
         self.stage_status_var = tk.StringVar(value="Stage: not connected")
+        self.stage_status_display_var = tk.StringVar(value="not connected")
         self.stage_version_var = tk.StringVar(value="Controller: -")
         self.stage_position_var = tk.StringVar(value="X: -, Y: -")
+
+        def sync_stage_status_display(*_args):
+            text = self.stage_status_var.get().strip()
+            if text.lower().startswith("stage:"):
+                text = text.split(":", 1)[1].strip()
+            self.stage_status_display_var.set(text or "-")
+
+        self.stage_status_var.trace_add("write", sync_stage_status_display)
+        sync_stage_status_display()
+
         stage_status_row = tk.Frame(xyz)
         stage_status_row.grid(row=0, column=0, sticky="ew")
-        tk.Label(stage_status_row, textvariable=self.stage_status_var, font=("Segoe UI", 9, "bold")).pack(side="left", fill="x", expand=True)
-        tk.Button(stage_status_row, text="Reconnect", command=self.reconnect_stage).pack(side="right")
+        stage_status_row.grid_columnconfigure(1, weight=1)
+        tk.Label(stage_status_row, text="Stage:", width=8, anchor="w", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(stage_status_row, textvariable=self.stage_status_display_var, anchor="w", font=("Segoe UI", 9, "bold")).grid(row=0, column=1, sticky="ew")
+        tk.Button(stage_status_row, text="Reconnect", command=self.reconnect_stage).grid(row=0, column=2, sticky="e")
         live_xy = tk.Frame(xyz)
         live_xy.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        tk.Label(live_xy, text="Live XY:", fg=self.theme["muted"]).pack(side="left")
+        tk.Label(live_xy, text="Live XY:", fg=self.theme["text"], width=8, anchor="w").pack(side="left")
         self.current_x_label = tk.Label(live_xy, text="X: -", fg=self.theme["success"])
         self.current_y_label = tk.Label(live_xy, text="Y: -", fg=self.theme["success"])
-        self.current_x_label.pack(side="left", padx=(6, 4))
+        self.current_x_label.pack(side="left", padx=(0, 4))
         self.current_y_label.pack(side="left")
 
-        saved = tk.LabelFrame(xyz, text="Saved Positions", padx=6, pady=5)
-        saved.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        saved = tk.LabelFrame(stage_tab, text="Saved Sites", padx=6, pady=5)
+        saved.pack(fill="x", pady=(0, 6))
         tree_wrap = tk.Frame(saved)
         tree_wrap.pack(fill="both", expand=True)
-        self.positions_tree = ttk.Treeview(tree_wrap, columns=("site", "name", "x", "y", "z", "roi"), show="headings", height=7, style="Dark.Treeview", selectmode="extended")
+        self.positions_tree = ttk.Treeview(tree_wrap, columns=("site", "name", "x", "y", "z", "roi"), show="headings", height=16, style="Dark.Treeview", selectmode="extended")
         for name, label, width, anchor in (
             ("site", "Site", 34, "center"),
             ("name", "Name", 74, "w"),
@@ -446,9 +458,9 @@ class UIBuilderMixin:
         tk.Button(saved_actions, text="\U0001F5D1", command=self.delete_selected_position, width=4).pack(side="left", padx=(0, 4))
         tk.Button(saved_actions, text="Go To", command=self.goto_selected_position, width=8).pack(side="left")
 
-        position_panel = tk.Frame(xyz)
-        position_panel.grid(row=3, column=0, sticky="ew", pady=(6, 0))
-        tk.Label(position_panel, text="Position name").pack(anchor="w")
+        position_panel = tk.Frame(stage_tab)
+        position_panel.pack(fill="x", pady=(0, 6))
+        tk.Label(position_panel, text="Site Name").pack(anchor="w")
         tk.Entry(position_panel, textvariable=self.selected_name_var, width=20).pack(fill="x", pady=(1, 4))
         for text, command in (
             ("Add New Site", self.add_current_position),
@@ -461,11 +473,15 @@ class UIBuilderMixin:
             self._build_nis_z_ui(stage_tab)
 
     def _build_center_workspace(self, parent):
-        spectral = tk.LabelFrame(parent, text="Control Bar", padx=4, pady=3)
-        spectral.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        compact_font = ("Segoe UI", 8)
-        for col in range(15):
-            spectral.grid_columnconfigure(col, weight=1 if col % 2 else 0, minsize=0)
+        spectral = tk.LabelFrame(parent, text="Control Bar", padx=8, pady=6)
+        spectral.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        spectral.grid_columnconfigure(0, weight=1)
+        control_label_font = ("Segoe UI", 8)
+        control_font = ("Segoe UI", 9)
+        control_row = tk.Frame(spectral)
+        control_row.grid(row=0, column=0, sticky="ew")
+        for col in range(7):
+            control_row.grid_columnconfigure(col, weight=1, minsize=70)
         self.param_vars["scan_mode"] = tk.StringVar(value="Medium")
         self.param_vars["spectral_sampling"] = tk.StringVar(value="Uniform lambda")
         self.param_vars["trigger_mode"] = tk.StringVar(value="Internal")
@@ -475,62 +491,64 @@ class UIBuilderMixin:
         self.param_vars["binning"] = tk.StringVar(value="None")
         self.param_vars["data_type"] = tk.StringVar(value="SinglePrecision")
         controls = [
-            ("Spectral", "scan_mode", "menu", self.SCAN_MODES.keys(), 6),
-            ("Sampling", "spectral_sampling", "menu", self.SPECTRAL_SAMPLING.keys(), 10),
-            ("Bands", "bands", "entry", None, 4),
-            ("Avg", "averages", "menu", ("1", "2", "3"), 2),
-            ("Bin", "binning", "menu", self.BINNING_OPTIONS.keys(), 5),
-            ("Data", "data_type", "menu", self.DATA_TYPES.keys(), 10),
+            ("Spectral", "scan_mode", "menu", self.SCAN_MODES.keys(), 8),
+            ("Sampling", "spectral_sampling", "menu", self.SPECTRAL_SAMPLING.keys(), 12),
+            ("Bands", "bands", "entry", None, 6),
+            ("Avg", "averages", "menu", ("1", "2", "3"), 4),
+            ("Bin", "binning", "menu", self.BINNING_OPTIONS.keys(), 7),
+            ("Data", "data_type", "menu", self.DATA_TYPES.keys(), 12),
         ]
         for index, (label, key, kind, options, width) in enumerate(controls):
-            label_col = index * 2
-            control_col = label_col + 1
-            tk.Label(spectral, text=label, font=compact_font).grid(row=0, column=label_col, sticky="e", padx=(0, 2), pady=0)
+            cell = tk.Frame(control_row)
+            cell.grid(row=0, column=index, sticky="ew", padx=(0, 8))
+            cell.grid_columnconfigure(0, weight=1)
+            tk.Label(cell, text=label, font=control_label_font, fg=self.theme["muted"]).grid(row=0, column=0, sticky="w", pady=(0, 2))
             if kind == "menu":
-                menu = tk.OptionMenu(spectral, self.param_vars[key], *list(options))
-                menu.config(width=width, font=compact_font, padx=1, pady=0, highlightthickness=0)
-                menu["menu"].config(font=compact_font)
-                menu.grid(row=0, column=control_col, sticky="ew", padx=(0, 4), pady=0)
+                menu = tk.OptionMenu(cell, self.param_vars[key], *list(options))
+                menu.config(width=width, font=control_font, padx=4, pady=1, highlightthickness=0)
+                menu["menu"].config(font=control_font)
+                menu.grid(row=1, column=0, sticky="ew")
             else:
-                tk.Entry(spectral, textvariable=self.param_vars[key], width=width, font=compact_font).grid(
-                    row=0,
-                    column=control_col,
+                tk.Entry(cell, textvariable=self.param_vars[key], width=width, font=control_font).grid(
+                    row=1,
+                    column=0,
                     sticky="ew",
-                    padx=(0, 4),
-                    pady=0,
                 )
-        set_col = len(controls) * 2
+        set_col = len(controls)
         tk.Button(
-            spectral,
+            control_row,
             text="Set",
             command=self.apply_parameters_async,
-            font=compact_font,
-            padx=6,
-            pady=0,
-        ).grid(row=0, column=set_col, sticky="ew", padx=(2, 0), pady=0)
+            font=("Segoe UI Semibold", 9),
+            padx=10,
+            pady=2,
+        ).grid(row=0, column=set_col, sticky="nsew", padx=(0, 0), pady=(15, 0))
         flatfield_bar = tk.Frame(spectral)
-        flatfield_bar.grid(row=1, column=0, columnspan=set_col + 1, sticky="ew", pady=(3, 0))
-        tk.Label(flatfield_bar, text="Flatfield", font=("Segoe UI Semibold", 8)).pack(side="left", padx=(0, 4))
-        tk.Label(flatfield_bar, textvariable=self.flatfield_status_var, font=compact_font, width=23, anchor="w").pack(side="left", padx=(0, 3))
+        flatfield_bar.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        tk.Label(flatfield_bar, text="Flatfield", font=control_label_font, fg=self.theme["muted"]).pack(side="left", padx=(0, 6))
+        tk.Label(flatfield_bar, textvariable=self.flatfield_status_var, font=control_font, width=28, anchor="w").pack(side="left", padx=(0, 5))
         self.flatfield_acquire_button = tk.Button(
             flatfield_bar,
             text="Acquire",
             command=self.start_flatfield_acquisition,
-            font=compact_font,
+            font=control_font,
             padx=4,
-            pady=0,
+            pady=1,
         )
-        self.flatfield_acquire_button.pack(side="left", padx=(0, 2))
+        self.flatfield_acquire_button._hera_control_bar_button = True
+        self.flatfield_acquire_button.pack(side="left", padx=(0, 4))
         self.flatfield_import_button = tk.Button(
             flatfield_bar,
             text="Import Ref",
             command=self.import_flatfield_reference,
-            font=compact_font,
+            font=control_font,
             padx=4,
-            pady=0,
+            pady=1,
         )
-        self.flatfield_import_button.pack(side="left", padx=(0, 2))
-        self.flatfield_clear_button = tk.Button(flatfield_bar, text="Clear", command=self.clear_flatfield, font=compact_font, padx=4, pady=0)
+        self.flatfield_import_button._hera_control_bar_button = True
+        self.flatfield_import_button.pack(side="left", padx=(0, 4))
+        self.flatfield_clear_button = tk.Button(flatfield_bar, text="Clear", command=self.clear_flatfield, font=control_font, padx=4, pady=1)
+        self.flatfield_clear_button._hera_control_bar_button = True
         self.flatfield_clear_button.pack(side="left", padx=(0, 4))
 
         self._build_views_and_log(parent)
@@ -678,6 +696,7 @@ class UIBuilderMixin:
             ("Site", self.current_site_var),
             ("Cycle", self.current_cycle_var),
             ("Next loop", self.next_loop_remaining_var),
+            ("Total run time", self.total_run_time_var),
         ):
             tk.Label(status_strip, text="|", fg=self.theme["muted"], font=compact_font).pack(side="left", padx=(0, 6))
             tk.Label(status_strip, text=f"{label}:", fg=self.theme["muted"], font=compact_font).pack(side="left")
@@ -708,14 +727,15 @@ class UIBuilderMixin:
         self.refresh_visible_log()
 
     def _build_right_controls(self, parent):
-        acquisition = tk.LabelFrame(parent, text="Acquisition / Timelapse", padx=6, pady=5)
+        acquisition = tk.LabelFrame(parent, text="Acquisition", padx=6, pady=5)
         acquisition.pack(fill="x", pady=(0, 6))
         start_button = tk.Button(acquisition, text="Start Single Acquisition", command=self.start_acquisition)
         start_button.pack(fill="x", pady=2)
         self.start_acquisition_buttons.append(start_button)
         tk.Button(acquisition, text="Abort Acquisition", command=self.abort_acquisition).pack(fill="x", pady=2)
-        ttk.Separator(acquisition, orient="horizontal", style="Dark.TSeparator").pack(fill="x", pady=6)
 
+        timelapse = tk.LabelFrame(parent, text="Timelapse", padx=6, pady=5)
+        timelapse.pack(fill="x", pady=(0, 6))
         self.interval_var = tk.DoubleVar(value=10.0)
         self.stop_after_var = tk.DoubleVar(value=0.0)
         self.timelapse_site_retries_var = tk.IntVar(value=3)
@@ -726,20 +746,20 @@ class UIBuilderMixin:
             ("Stop after (min)", self.stop_after_var),
             ("Speed XY", self.stage_speed_var),
         ):
-            row = tk.Frame(acquisition)
+            row = tk.Frame(timelapse)
             row.pack(fill="x", pady=1)
             tk.Label(row, text=label, width=13, anchor="w").pack(side="left")
             tk.Entry(row, textvariable=var, width=7).pack(side="left")
-        sites_row = tk.Frame(acquisition)
+        sites_row = tk.Frame(timelapse)
         sites_row.pack(fill="x", pady=(4, 1))
         tk.Label(sites_row, text="Sites", width=13, anchor="w").pack(side="left")
         tk.Entry(sites_row, textvariable=self.timelapse_sites_var, width=12).pack(side="left", fill="x", expand=True)
         tk.Button(sites_row, text="All", command=self.select_all_timelapse_sites, width=5).pack(side="left", padx=(4, 0))
-        tk.Button(acquisition, text="Run One Loop", command=self.run_one_cycle).pack(fill="x", pady=2)
-        tk.Button(acquisition, text="Run Timelapse", command=self.start_timelapse).pack(fill="x", pady=2)
-        self.pause_button = tk.Button(acquisition, text="Pause", command=self.pause_or_resume_timelapse)
+        tk.Button(timelapse, text="Run One Loop", command=self.run_one_cycle).pack(fill="x", pady=2)
+        tk.Button(timelapse, text="Run Timelapse", command=self.start_timelapse).pack(fill="x", pady=2)
+        self.pause_button = tk.Button(timelapse, text="Pause", command=self.pause_or_resume_timelapse)
         self.pause_button.pack(fill="x", pady=2)
-        tk.Button(acquisition, text="Stop Timelapse", command=self.stop_timelapse).pack(fill="x", pady=2)
+        tk.Button(timelapse, text="Stop Timelapse", command=self.stop_timelapse).pack(fill="x", pady=2)
 
         saving = tk.LabelFrame(parent, text="Export", padx=6, pady=5)
         saving.pack(fill="x", pady=(0, 6))
@@ -916,7 +936,7 @@ class UIBuilderMixin:
 
         actions = tk.Frame(frame)
         actions.grid(row=0, column=0, sticky="ew", pady=(10, 0))
-        tk.Label(actions, text="Position name").pack(anchor="w", pady=(0, 2))
+        tk.Label(actions, text="Site Name").pack(anchor="w", pady=(0, 2))
         tk.Entry(actions, textvariable=self.selected_name_var, width=24).pack(fill="x", pady=(0, 6))
         tk.Button(actions, text="Add New Site", command=self.add_current_position).pack(fill="x", pady=4)
         tk.Button(actions, text="Update Selected Site", command=self.update_selected_position).pack(fill="x", pady=4)
@@ -1143,7 +1163,7 @@ class UIBuilderMixin:
             widget.bind("<Button-5>", lambda _e: self.step_hyper_band(-1))
             widget.bind("<Button-1>", lambda _e, target=widget: target.focus_set(), add="+")
 
-        pos_frame = tk.LabelFrame(parent, text="Saved Positions", padx=10, pady=10)
+        pos_frame = tk.LabelFrame(parent, text="Saved Sites", padx=10, pady=10)
         pos_frame.pack(fill="x", pady=(0, 10))
         header = tk.Frame(pos_frame)
         header.pack(fill="x", pady=(0, 8))
@@ -1178,6 +1198,7 @@ class UIBuilderMixin:
             ("Site", self.current_site_var),
             ("Cycle", self.current_cycle_var),
             ("Next loop", self.next_loop_remaining_var),
+            ("Total run time", self.total_run_time_var),
         ):
             tk.Label(status_strip, text="|", fg="#9aa6b2").pack(side="left", padx=(0, 10))
             tk.Label(status_strip, text=f"{label}:", fg="#9aa6b2").pack(side="left")

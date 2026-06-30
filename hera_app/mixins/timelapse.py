@@ -122,6 +122,7 @@ class TimelapseMixin:
         self.trigger_log_path = ""
         self._begin_trigger_log_file()
         self.timelapse_started_at = datetime.now()
+        self.total_run_time_var.set("00:00")
         self.timelapse_stop_at = None
         self.timelapse_roi = self._get_active_roi()
         self.pause_button.config(text="Pause")
@@ -161,6 +162,7 @@ class TimelapseMixin:
         self.trigger_log_path = ""
         self._begin_trigger_log_file()
         self.timelapse_started_at = datetime.now()
+        self.total_run_time_var.set("00:00")
         stop_after = float(self.stop_after_var.get())
         self.timelapse_stop_at = self.timelapse_started_at + timedelta(minutes=stop_after) if stop_after > 0 else None
         self.timelapse_roi = self._get_active_roi()
@@ -334,6 +336,9 @@ class TimelapseMixin:
         self.timelapse_status_var.set("Timelapse: idle")
         self.time_remaining_var.set("Time remaining: -")
         self.next_loop_remaining_var.set("-")
+        if getattr(self, "timelapse_started_at", None):
+            elapsed = datetime.now() - self.timelapse_started_at
+            self.total_run_time_var.set(self._format_countdown_seconds(int(elapsed.total_seconds())))
         self.current_cycle_var.set("-")
         self.current_site_var.set("-")
         if self.app_state != self.STATE_LABELS["Error"]:
@@ -511,6 +516,9 @@ class TimelapseMixin:
         return self.last_export_path
 
     def _update_time_remaining(self):
+        if self.timelapse_thread and self.timelapse_thread.is_alive() and getattr(self, "timelapse_started_at", None):
+            elapsed = datetime.now() - self.timelapse_started_at
+            self.total_run_time_var.set(self._format_countdown_seconds(int(elapsed.total_seconds())))
         if self.timelapse_thread and self.timelapse_thread.is_alive() and self.timelapse_stop_at:
             remaining = self.timelapse_stop_at - datetime.now()
             seconds = max(int(remaining.total_seconds()), 0)

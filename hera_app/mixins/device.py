@@ -626,10 +626,19 @@ class DeviceMixin:
         return False
 
     def _set_license_status_text(self, text):
+        display_text = self._format_license_status_text(text)
         if self._is_ui_thread():
-            self.license_var.set(text)
+            self.license_var.set(display_text)
         else:
-            self._set_var_async(self.license_var, text)
+            self._set_var_async(self.license_var, display_text)
+
+    def _format_license_status_text(self, text):
+        display_text = str(text or "").strip()
+        if display_text == "Licensed":
+            return "Valid"
+        if display_text == "Not licensed":
+            return "Invalid"
+        return display_text or "-"
 
     def refresh_hdr_status(self):
         if not self.controller or not self.controller.connected:

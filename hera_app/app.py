@@ -129,6 +129,7 @@ class HeraTriggerApp(
         self.timelapse_stop_event = threading.Event()
         self.timelapse_pause_event = threading.Event()
         self.timelapse_run_id = 0
+        self.timelapse_started_at = None
         self.timelapse_roi = None
         self.next_loop_deadline = None
         self.acquisition_inflight = False
@@ -152,6 +153,7 @@ class HeraTriggerApp(
         self.timelapse_status_var = tk.StringVar(value="Timelapse: idle")
         self.time_remaining_var = tk.StringVar(value="Time remaining: -")
         self.next_loop_remaining_var = tk.StringVar(value="-")
+        self.total_run_time_var = tk.StringVar(value="-")
         self.center_stage_summary_var = tk.StringVar(value="Selected position: none")
         self.current_cycle_var = tk.StringVar(value="-")
         self.current_site_var = tk.StringVar(value="-")
@@ -159,7 +161,7 @@ class HeraTriggerApp(
         self.run_progress_var = tk.DoubleVar(value=0.0)
         self.run_progress_text_var = tk.StringVar(value="Progress: idle")
         self.run_progress_mode = "determinate"
-        self.default_output_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), "output")
+        self.default_output_dir = r"C:\BIOS DATA\jiayi\APP"
         self.show_detail_log_var = tk.BooleanVar(value=False)
         self.detail_log_messages = []
         self.background_log_path = os.path.join(self.default_output_dir, "hera_background_status.log")
@@ -177,7 +179,7 @@ class HeraTriggerApp(
         self._write_startup_log_marker()
         self.hyperlab_shortcut_var = tk.StringVar(value=r"C:\Users\Public\Desktop\Nireos HyperLAB.lnk")
         self.hypercube_summary_var = tk.StringVar(value="Cube: waiting for acquisition")
-        self.live_view_status_var = tk.StringVar(value="Live view: waiting for frames")
+        self.live_view_status_var = tk.StringVar(value="Waiting for frames")
         self.hdr_enabled_var = tk.BooleanVar(value=False)
         self.hdr_status_var = tk.StringVar(value=self.hdr_status_text(None))
         self.hdr_startup_default_enabled = False

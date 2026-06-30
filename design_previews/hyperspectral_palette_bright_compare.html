@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bright Palette Compare - Hyperspectral Scanning Acquisition APP</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 22px;
+      background: #eef2f7;
+      color: #162033;
+      font-family: "Segoe UI", Arial, sans-serif;
+    }
+    header {
+      max-width: 1500px;
+      margin: 0 auto 16px;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+    .note {
+      margin: 0;
+      color: #5f6c7d;
+      font-size: 13px;
+    }
+    .grid {
+      max-width: 1500px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .option {
+      background: #ffffff;
+      border: 1px solid #cfd8e5;
+      box-shadow: 0 14px 36px rgba(16, 24, 40, 0.12);
+    }
+    .option-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 13px 14px;
+      border-bottom: 1px solid #d7e0ea;
+      background: #f8fafc;
+    }
+    .option-title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .option-desc {
+      margin: 3px 0 0;
+      color: #667085;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .swatches {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #667085;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .swatch {
+      width: 24px;
+      height: 24px;
+      border: 1px solid rgba(0, 0, 0, 0.18);
+    }
+    .mock-pair {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      padding: 14px;
+      background: #eef3f8;
+    }
+    .mock {
+      --bg: #111316;
+      --panel: #171a1f;
+      --section: #1b2026;
+      --sub: #20262d;
+      --field: #0d0f12;
+      --line: #303842;
+      --text: #eef2f7;
+      --muted: #94a3b8;
+      --title: #f8fafc;
+      --button: #252b33;
+      --button-active: #303843;
+      --canvas: #080c12;
+      --grid: #1b2430;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--line);
+      padding: 10px;
+    }
+    .mock.light {
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --section: #f7f9fc;
+      --sub: #eef3f8;
+      --field: #ffffff;
+      --line: #cfd8e5;
+      --text: #182230;
+      --muted: #667085;
+      --title: #111827;
+      --button: #edf2f7;
+      --button-active: #dfe8f2;
+      --canvas: #f8fafc;
+      --grid: #dde5ee;
+    }
+    .original.dark {
+      --accent: #2f7df6;
+      --accent-active: #4f91ff;
+      --accent-soft: #8bb8ff;
+      --orange: #f28b2e;
+      --orange-active: #ff9f4f;
+      --orange-text: #111827;
+    }
+    .original.light {
+      --accent: #256fe8;
+      --accent-active: #1d5fd0;
+      --accent-soft: #3f7fe8;
+      --orange: #d97728;
+      --orange-active: #c96820;
+      --orange-text: #ffffff;
+    }
+    .balanced.dark {
+      --accent: #3f7fe2;
+      --accent-active: #5a93ee;
+      --accent-soft: #8eb6f5;
+      --orange: #df8138;
+      --orange-active: #ee9452;
+      --orange-text: #111827;
+    }
+    .balanced.light {
+      --accent: #326fd3;
+      --accent-active: #275fbf;
+      --accent-soft: #5689df;
+      --orange: #c9732f;
+      --orange-active: #b76626;
+      --orange-text: #ffffff;
+    }
+    .mock-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      color: var(--title);
+      font-weight: 700;
+      font-size: 13px;
+    }
+    .mode-tag {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .app-shell {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr) 168px;
+      gap: 8px;
+      min-height: 310px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 8px;
+    }
+    .tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 8px;
+    }
+    .tab {
+      padding: 4px 9px;
+      background: var(--button);
+      color: var(--muted);
+      border: 1px solid var(--line);
+      font-size: 12px;
+    }
+    .tab.active {
+      background: var(--accent);
+      color: #ffffff;
+    }
+    .section {
+      background: var(--section);
+      border: 1px solid var(--line);
+      padding: 7px;
+      margin-bottom: 7px;
+    }
+    .section-title {
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 4px 0;
+      font-size: 11px;
+    }
+    .value {
+      color: var(--accent-soft);
+      font-weight: 600;
+    }
+    .field {
+      min-width: 52px;
+      padding: 3px 5px;
+      color: var(--text);
+      background: var(--field);
+      border: 1px solid var(--line);
+      text-align: right;
+    }
+    .button-row {
+      display: flex;
+      gap: 5px;
+      margin-top: 7px;
+    }
+    .btn {
+      flex: 1;
+      padding: 5px 7px;
+      background: var(--button);
+      color: var(--text);
+      border: 1px solid var(--line);
+      text-align: center;
+      font-size: 11px;
+    }
+    .btn.blue {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+    }
+    .btn.orange {
+      background: var(--orange);
+      color: var(--orange-text);
+      border-color: var(--orange);
+      font-weight: 700;
+    }
+    .workspace {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 8px;
+    }
+    .control {
+      background: var(--section);
+      border: 1px solid var(--line);
+      padding: 7px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+    }
+    .select {
+      padding: 3px 16px;
+      background: var(--button);
+      border: 1px solid var(--accent);
+      color: var(--text);
+    }
+    .view {
+      background:
+        linear-gradient(90deg, transparent 24px, var(--grid) 25px, transparent 26px),
+        linear-gradient(0deg, transparent 24px, var(--grid) 25px, transparent 26px),
+        var(--canvas);
+      border: 1px solid var(--line);
+      min-height: 190px;
+      padding: 10px;
+      position: relative;
+      overflow: hidden;
+    }
+    .sample {
+      width: 56%;
+      aspect-ratio: 1;
+      margin: 24px auto 0;
+      border-radius: 6px;
+      background:
+        radial-gradient(circle at 25% 25%, rgba(255,255,255,0.18), transparent 11%),
+        radial-gradient(circle at 72% 32%, rgba(255,255,255,0.14), transparent 12%),
+        radial-gradient(circle at 44% 74%, rgba(255,255,255,0.16), transparent 12%),
+        linear-gradient(135deg, rgba(255,255,255,0.18), rgba(255,255,255,0.04));
+      border: 1px solid rgba(255,255,255,0.08);
+      opacity: 0.9;
+    }
+    .trace {
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      bottom: 12px;
+      height: 38px;
+      border-top: 1px solid rgba(255,255,255,0.12);
+    }
+    .trace svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .status {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      background: var(--section);
+      border: 1px solid var(--line);
+      padding: 6px 8px;
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .bar {
+      flex: 1;
+      height: 8px;
+      background: var(--field);
+      border: 1px solid var(--line);
+      overflow: hidden;
+    }
+    .fill {
+      width: 63%;
+      height: 100%;
+      background: var(--accent);
+    }
+    .export-row {
+      display: flex;
+      gap: 5px;
+      margin-top: 6px;
+    }
+    .check {
+      width: 12px;
+      height: 12px;
+      display: inline-block;
+      margin-right: 4px;
+      background: var(--field);
+      border: 1px solid var(--line);
+      vertical-align: -2px;
+    }
+    .checked {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    code {
+      color: #475467;
+      background: #eef3f8;
+      padding: 1px 4px;
+      border-radius: 3px;
+    }
+    @media (max-width: 1100px) {
+      .grid { grid-template-columns: 1fr; }
+      .app-shell { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Bright Palette Compare</h1>
+    <p class="note">Preview only. The running APP theme is unchanged. Option 1 restores the original bright palette; Option 2 keeps the same direction but tones it down slightly.</p>
+  </header>
+
+  <main class="grid">
+    <section class="option">
+      <div class="option-head">
+        <div>
+          <p class="option-title">1. Original bright</p>
+          <p class="option-desc">Most vivid. Strongest blue/orange contrast, closest to the earlier bright UI.</p>
+        </div>
+        <div class="swatches">
+          <span>Dark</span>
+          <span class="swatch" style="background:#2f7df6"></span>
+          <span class="swatch" style="background:#f28b2e"></span>
+        </div>
+      </div>
+      <div class="mock-pair">
+        <div class="mock original dark">
+          <div class="mock-title">Hyperspectral Scanning Acquisition APP <span class="mode-tag">Dark</span></div>
+          <div class="app-shell">
+            <aside class="panel">
+              <div class="tabs"><div class="tab active">Camera</div><div class="tab">Stage</div></div>
+              <div class="section">
+                <div class="section-title">Run Status</div>
+                <div class="row"><span>Status</span><span class="value">Ready</span></div>
+                <div class="row"><span>Live XY</span><span class="value">X 12.4 Y 9.8</span></div>
+              </div>
+              <div class="section">
+                <div class="section-title">Parameters</div>
+                <div class="row"><span>Exposure</span><span class="field">3.0</span></div>
+                <div class="row"><span>16-bit HDR</span><span class="value">On</span></div>
+              </div>
+            </aside>
+            <section class="workspace">
+              <div class="control"><span>Spectral</span><span class="select">Medium</span><span>Bands</span><span class="field">1300</span><span class="btn blue">Set</span></div>
+              <div class="view"><div class="sample"></div><div class="trace"><svg viewBox="0 0 300 40" preserveAspectRatio="none"><polyline fill="none" stroke="var(--orange)" stroke-width="2" points="0,31 20,30 40,23 63,18 86,25 106,15 128,24 150,17 172,22 196,12 220,24 244,18 270,28 300,30"/></svg></div></div>
+              <div class="status"><span>Status: acquiring</span><span>| Site 3</span><span>| Cycle 12</span><div class="bar"><div class="fill"></div></div></div>
+            </section>
+            <aside class="panel">
+              <div class="section">
+                <div class="section-title">Acquisition</div>
+                <div class="btn orange">Run Timelapse</div>
+                <div class="button-row"><div class="btn">Pause</div><div class="btn">Stop</div></div>
+              </div>
+              <div class="section">
+                <div class="section-title">Export</div>
+                <div class="export-row"><span><i class="check checked"></i>raw</span><span><i class="check checked"></i>nrm</span></div>
+              </div>
+            </aside>
+          </div>
+        </div>
+
+        <div class="mock original light">
+          <div class="mock-title">Hyperspectral Scanning Acquisition APP <span class="mode-tag">Light</span></div>
+          <div class="app-shell">
+            <aside class="panel">
+              <div class="tabs"><div class="tab active">Camera</div><div class="tab">Stage</div></div>
+              <div class="section">
+                <div class="section-title">Run Status</div>
+                <div class="row"><span>Status</span><span class="value">Ready</span></div>
+                <div class="row"><span>Live XY</span><span class="value">X 12.4 Y 9.8</span></div>
+              </div>
+              <div class="section">
+                <div class="section-title">Parameters</div>
+                <div class="row"><span>Exposure</span><span class="field">3.0</span></div>
+                <div class="row"><span>16-bit HDR</span><span class="value">On</span></div>
+              </div>
+            </aside>
+            <section class="workspace">
+              <div class="control"><span>Spectral</span><span class="select">Medium</span><span>Bands</span><span class="field">1300</span><span class="btn blue">Set</span></div>
+              <div class="view"><div class="sample"></div><div class="trace"><svg viewBox="0 0 300 40" preserveAspectRatio="none"><polyline fill="none" stroke="var(--orange)" stroke-width="2" points="0,31 20,30 40,23 63,18 86,25 106,15 128,24 150,17 172,22 196,12 220,24 244,18 270,28 300,30"/></svg></div></div>
+              <div class="status"><span>Status: acquiring</span><span>| Site 3</span><span>| Cycle 12</span><div class="bar"><div class="fill"></div></div></div>
+            </section>
+            <aside class="panel">
+              <div class="section">
+                <div class="section-title">Acquisition</div>
+                <div class="btn orange">Run Timelapse</div>
+                <div class="button-row"><div class="btn">Pause</div><div class="btn">Stop</div></div>
+              </div>
+              <div class="section">
+                <div class="section-title">Export</div>
+                <div class="export-row"><span><i class="check checked"></i>raw</span><span><i class="check checked"></i>nrm</span></div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="option">
+      <div class="option-head">
+        <div>
+          <p class="option-title">2. Slightly darker than original</p>
+          <p class="option-desc">Still visibly bright, but less saturated than the original and brighter than the current muted theme.</p>
+        </div>
+        <div class="swatches">
+          <span>Dark</span>
+          <span class="swatch" style="background:#3f7fe2"></span>
+          <span class="swatch" style="background:#df8138"></span>
+        </div>
+      </div>
+      <div class="mock-pair">
+        <div class="mock balanced dark">
+          <div class="mock-title">Hyperspectral Scanning Acquisition APP <span class="mode-tag">Dark</span></div>
+          <div class="app-shell">
+            <aside class="panel">
+              <div class="tabs"><div class="tab active">Camera</div><div class="tab">Stage</div></div>
+              <div class="section">
+                <div class="section-title">Run Status</div>
+                <div class="row"><span>Status</span><span class="value">Ready</span></div>
+                <div class="row"><span>Live XY</span><span class="value">X 12.4 Y 9.8</span></div>
+              </div>
+              <div class="section">
+                <div class="section-title">Parameters</div>
+                <div class="row"><span>Exposure</span><span class="field">3.0</span></div>
+                <div class="row"><span>16-bit HDR</span><span class="value">On</span></div>
+              </div>
+            </aside>
+            <section class="workspace">
+              <div class="control"><span>Spectral</span><span class="select">Medium</span><span>Bands</span><span class="field">1300</span><span class="btn blue">Set</span></div>
+              <div class="view"><div class="sample"></div><div class="trace"><svg viewBox="0 0 300 40" preserveAspectRatio="none"><polyline fill="none" stroke="var(--orange)" stroke-width="2" points="0,31 20,30 40,23 63,18 86,25 106,15 128,24 150,17 172,22 196,12 220,24 244,18 270,28 300,30"/></svg></div></div>
+              <div class="status"><span>Status: acquiring</span><span>| Site 3</span><span>| Cycle 12</span><div class="bar"><div class="fill"></div></div></div>
+            </section>
+            <aside class="panel">
+              <div class="section">
+                <div class="section-title">Acquisition</div>
+                <div class="btn orange">Run Timelapse</div>
+                <div class="button-row"><div class="btn">Pause</div><div class="btn">Stop</div></div>
+              </div>
+              <div class="section">
+                <div class="section-title">Export</div>
+                <div class="export-row"><span><i class="check checked"></i>raw</span><span><i class="check checked"></i>nrm</span></div>
+              </div>
+            </aside>
+          </div>
+        </div>
+
+        <div class="mock balanced light">
+          <div class="mock-title">Hyperspectral Scanning Acquisition APP <span class="mode-tag">Light</span></div>
+          <div class="app-shell">
+            <aside class="panel">
+              <div class="tabs"><div class="tab active">Camera</div><div class="tab">Stage</div></div>
+              <div class="section">
+                <div class="section-title">Run Status</div>
+                <div class="row"><span>Status</span><span class="value">Ready</span></div>
+                <div class="row"><span>Live XY</span><span class="value">X 12.4 Y 9.8</span></div>
+              </div>
+              <div class="section">
+                <div class="section-title">Parameters</div>
+                <div class="row"><span>Exposure</span><span class="field">3.0</span></div>
+                <div class="row"><span>16-bit HDR</span><span class="value">On</span></div>
+              </div>
+            </aside>
+            <section class="workspace">
+              <div class="control"><span>Spectral</span><span class="select">Medium</span><span>Bands</span><span class="field">1300</span><span class="btn blue">Set</span></div>
+              <div class="view"><div class="sample"></div><div class="trace"><svg viewBox="0 0 300 40" preserveAspectRatio="none"><polyline fill="none" stroke="var(--orange)" stroke-width="2" points="0,31 20,30 40,23 63,18 86,25 106,15 128,24 150,17 172,22 196,12 220,24 244,18 270,28 300,30"/></svg></div></div>
+              <div class="status"><span>Status: acquiring</span><span>| Site 3</span><span>| Cycle 12</span><div class="bar"><div class="fill"></div></div></div>
+            </section>
+            <aside class="panel">
+              <div class="section">
+                <div class="section-title">Acquisition</div>
+                <div class="btn orange">Run Timelapse</div>
+                <div class="button-row"><div class="btn">Pause</div><div class="btn">Stop</div></div>
+              </div>
+              <div class="section">
+                <div class="section-title">Export</div>
+                <div class="export-row"><span><i class="check checked"></i>raw</span><span><i class="check checked"></i>nrm</span></div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
