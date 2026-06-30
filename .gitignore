@@ -8,6 +8,11 @@ output/
 *.tmp
 *.bak
 
+# Local-only private bridge/design files
+NIS-Z-Bridge/
+design_previews/
+AGENDA.md
+
 # Large local reference material
 *.zip
 MatLab/
