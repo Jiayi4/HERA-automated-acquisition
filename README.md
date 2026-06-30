@@ -1,121 +1,63 @@
-# Hera Trigger App
+# Hyperspectral Scanning Acquisition APP
 
-Python desktop app for triggering hyperspectral acquisitions on a NIREOS HERA system through the Hera SDK.
+Windows desktop app for controlling a NIREOS HERA hyperspectral camera and Tango XY stage for site-guided acquisitions, flatfield normalization, and timelapse scans.
 
-## Overview
+The app is designed for software-triggered acquisition. It keeps the Python app logic in the tracked `hera_app/` package and uses the top-level `AppHeraTriggerPython0417.py` only as a launcher.
 
-This project provides a simple Windows GUI for:
+## Main Capabilities
 
-- discovering connected HERA devices
-- connecting to a camera through the Hera SDK
-- validating license and environment setup
-- applying supported acquisition parameters
-- starting a hyperspectral acquisition
-- receiving SDK progress and completion callbacks
-- converting raw acquisition data into a hypercube
-- exporting results in ENVI format
+- Connect to the HERA camera through the Hera SDK and to the Tango XY stage.
+- Show a live camera preview with auto contrast, saturation overlay, crosshair profiles, zoom/pan, and ROI selection.
+- Apply camera parameters safely by stopping live capture when needed, setting parameters, reading back SDK state, and restarting live view.
+- Select an ROI from the live image or by entering width/height, then use that ROI for acquisition, display, and export.
+- Save stage sites with per-site ROI, then run one loop or a timed timelapse over selected site numbers.
+- Acquire/import a flatfield reference and display/export `Raw`, `Flatfield`, and `Normalized` hyperspectral cubes.
+- Export ENVI `.hdr`/data-file pairs for `_raw`, `_ref`, and `_nrm`, with HyperLAB-compatible headers.
+- Keep background logs and crash/issue summaries for long runs.
 
-The current implementation is focused on software-triggered acquisition and is structured so hardware-trigger workflows can be added later.
+## Project Structure
 
-## Features
-
-- Tkinter desktop UI
-- Hera SDK device enumeration and connection
-- license status check
-- scan mode and trigger mode support checks
-- graceful handling of read-only camera parameters
-- live-safe parameter apply that pauses live capture before changing gain, exposure, or ROI, then restarts it
-- compact live cursor X/Y readout over the camera frame
-- live-view ROI workflow: click two corners on the live image or edit ROI fields, then use that selected area for acquisition, ROI export, and hyperspectral display
-- saved stage positions keep their own ROI, so manual site runs, `Run First 2 Sites`, and timelapse loops use the ROI saved with each site
-- live-view exposure helpers: auto-contrast display, red saturation overlay, crosshair row/column intensity plots, and PNG snapshot export of the current displayed frame
-- adjustable three-pane interface with light/dark mode switching
-- keyboard-friendly controls: focused buttons and checkboxes run on Enter, entries commit their related action on Enter or when you leave the field, and connected camera option changes auto-apply after a short debounce
-- always-on background logging with an `Open Log` button for the latest issue summary after a crash
-- editable ROI corners, ROI width/height, and ROI area helpers
-- asynchronous acquisition callback handling
-- hypercube generation with `HeraAPI_GetHyperCubeEx`, plus ENVI post-export ROI cropping when the SDK returns a full-frame cube
-- persistent flatfield baseline acquisition; the Hyperspectral View can show `Normalized`, `Raw`, or `Flatfield`, and `_raw`/`_ref`/`_nrm` exports are controlled from the right-side Export panel
-- HyperLAB launch support that resolves the Nireos desktop shortcut to the installed `HyperLAB.exe` and opens the latest exported `.hdr`
-- ENVI export to a user-selected output folder, with headers patched to include the matching data file name for HyperLAB compatibility
-
-## Project Files
-
-- `AppHeraTriggerPython0417.py`: 4-line launcher — do not edit; all logic is in `hera_app/`
-- `requirements.txt`: Python dependency note
-- `.gitignore`: ignore rules for local runtime files and outputs
-
-### Package Structure
-
-```
-hera_app/
-    app.py                        HeraTriggerApp class + __init__ + on_close + main()
-    controllers/
-        hera.py                   HeraDeviceInfo, HeraController (SDK DLL wrapper)
-        tango.py                  TangoController (stage DLL wrapper)
-        nis_z.py                  NISZBridgeController (file-bridge TCP wrapper)
-    mixins/
-        theme.py                  _configure_theme, _apply_theme_recursive, toggle_theme_mode
-        ui_builder.py             all _build_* UI construction methods
-        device.py                 connect/disconnect Hera + Tango, license, preflight, HDR
-        nis_z_mixin.py            NIS Z bridge polling and control
-        stage.py                  stage motion, position management, Z moves
-        export.py                 ENVI file helpers, tag sanitisation, ROI crop
-        flatfield.py              flatfield acquisition, normalization, clear
-        acquisition.py            parameter apply, arm/start acquisition, worker
-        timelapse.py              timelapse/cycle worker, site acquisition
-        live_view.py              live capture, rendering, zoom, pan, snapshots
-        roi.py                    ROI selection, overlays, cursor readout
-        hyperspectral_viewer.py   band viewer, spectrum panel
-        utils.py                  _safe_after, _log_async, _set_var_async
+```text
+hera-trigger-app/
+    AppHeraTriggerPython0417.py   repository launcher
+    hera_app/
+        app.py                    app state, startup, shutdown, logging, main()
+        controllers/
+            hera.py               Hera SDK / HeraAPI.dll wrapper
+            tango.py              Tango stage DLL wrapper
+            nis_z.py              optional local NIS Z bridge client
+        helpers/
+            acquisition_helper.py helper-side acquisition/export logic
+            hera_service.py       optional helper service process
+            hera_service_client.py
+            hera_service_probe.py
+        mixins/
+            ui_builder.py         UI construction and widget behavior
+            device.py             Hera/Tango connection, license, preflight, HDR
+            acquisition.py        parameter apply, acquisition, callback, saving
+            timelapse.py          loop/site/timelapse worker
+            live_view.py          live capture, rendering, zoom/pan/snapshot
+            roi.py                ROI selection, coordinate mapping, overlays
+            flatfield.py          reference acquisition/import, normalization
+            hyperspectral_viewer.py band display and spectrum panel
+            export.py             ENVI export, ROI crop, HyperLAB header patching
+            stage.py              XY motion and saved sites
+            nis_z_mixin.py        optional NIS Z polling/controls
+            theme.py              light/dark theme
+            utils.py              safe Tk scheduling and async UI helpers
 ```
 
-When making changes, open the relevant mixin file directly. Use Ctrl+Shift+F to search across files if unsure where a method lives.
+The parent-folder launcher at `C:\BIOS DATA\Lina\PYTHON\AppHeraTriggerPython0417.py` delegates to this repository. A separate parent-folder `hera_app` runtime mirror is not required.
 
-## System Requirements
+## Requirements
 
-- Windows x64
-- Python 3.x
-- NIREOS Hera SDK available locally
-- valid HERA SDK license
-- `HERA_DEVICES` environment variable configured correctly
-- camera drivers and HERA device configuration files installed
-
-## Runtime Dependencies
-
-This repository includes the local Hera SDK and runtime binaries that were available in the development workspace at packaging time.
-
-The app expects access to:
-
-- bundled SDK/runtime DLLs in the repository folder
-- HERA device configuration files referenced by `HERA_DEVICES`
-
-You can still browse to a different SDK DLL from the application UI if needed.
-
-## Installation
-
-1. Clone or copy this repository to a Windows machine with the HERA system installed.
-2. Ensure Python 3 is installed.
-3. Ensure the Hera SDK DLLs are available locally.
-4. Set `HERA_DEVICES` to the correct device configuration folder.
-5. Confirm the SDK license is active.
-
-## What Is Bundled In This Repository
-
-The GitHub-ready folder includes:
-
-- the Python application
-- Hera SDK DLLs found in the local workspace
-- related runtime DLLs, headers, and import libraries found in the local workspace
-
-## What Is Still Machine Specific
-
-The following are still specific to the target installation:
-
-- `HERA_DEVICES` path and its device configuration files
-- installed camera drivers and vendor services
-- physical HERA/GEMINI-X/Kinetix hardware setup
-- valid SDK license activation on the target machine
+- Windows x64.
+- Python 3.
+- NIREOS Hera SDK installed or `HeraAPI.dll` available.
+- Active HERA SDK license on the machine.
+- `HERA_DEVICES` configured for the installed HERA device configuration.
+- Camera drivers/vendor services installed.
+- Tango stage runtime/DLL available when stage control is needed.
 
 ## Run
 
@@ -126,105 +68,136 @@ cd "C:\BIOS DATA\Lina\PYTHON\hera-trigger-app"
 python AppHeraTriggerPython0417.py
 ```
 
-The parent-folder launcher at `C:\BIOS DATA\Lina\PYTHON\AppHeraTriggerPython0417.py` also delegates to this repository folder. The app should run from the tracked `hera-trigger-app\hera_app` package; a separate parent-folder `hera_app` runtime mirror is not required.
+The current default output/log folder is:
+
+```text
+C:\BIOS DATA\jiayi\APP
+```
 
 ## Typical Workflow
 
-1. Launch the app.
-2. Verify the SDK DLL path and `HERA_DEVICES`.
-3. Refresh devices and connect to the HERA camera.
-4. Run the preflight check.
-5. Set an ROI if needed. Add or update a saved position after setting the ROI if that site should keep it.
-6. Edit acquisition parameters as needed. Entry fields commit on Enter or when you leave the field, and camera option changes auto-apply when connected. If live view is running, the app temporarily stops live capture, applies gain/exposure/ROI, reads back actual values, and restarts live view.
-7. Start a manual acquisition, run a selected site, run the first two sites, or start timelapse.
-8. Wait for the hypercube export to finish.
+1. Launch the app and wait for HERA/Tango connection.
+2. Check `Status`, `License`, `Live`, and `Stage` state.
+3. Use `Preflight` from `Advanced` when you want to check license, SDK state, export settings, and disk space before a long run.
+4. Set camera parameters in `Parameters`: gain, exposure, and `16-bit HDR`.
+5. Set spectral options in `Control Bar`: spectral mode, sampling mode, bands, averaging, binning, and data type. Press `Set` after editing these controls.
+6. Select or clear ROI in the `ROI` panel. The `Active ROI` line shows width, height, and area.
+7. Add or update sites in `Saved Sites`. Each site stores the current XY position and active ROI.
+8. Choose export folder/name/stamp and select exactly which products to save: `_raw`, `_ref`, and/or `_nrm`.
+9. Use `Start Single Acquisition`, `Run One Loop`, or `Run Timelapse`.
+10. Watch `Run Status` for Status, Site, Cycle, Next loop, Total run time, and progress.
 
-## Live View Cursor Coordinates
+## Camera And Spectral Settings
 
-The Live View tab shows the cursor X/Y over the rendered camera frame. The preview is rotated 90 degrees clockwise so a Tango right move reads as rightward motion in the display. The app inverse-maps the mouse location, crosshair, ROI overlay, and ROI clicks back to the live-frame pixels returned by `HeraAPI_GetLiveCaptureInfo`; there are no pixel-scale, invert-axis, or swap-axis controls in the stage panel.
+The camera `Parameters` panel controls exposure, gain, and `16-bit HDR`.
 
-## Interface Layout
+`16-bit HDR` calls the Hera SDK HDR setting before acquisition. The authoritative HDR state for saved data should be taken from the SDK data/cube HDR flags, which the app logs and writes into export metadata when available.
 
-The app uses a resizable three-pane layout:
+The `Control Bar` includes:
 
-- left pane: status, exposure, ROI, XYZ/stage controls, saved positions, and NIS Z bridge controls
-- center pane: spectral settings, live view, hyperspectral view, and run messages
-- right pane: acquisition/timelapse controls and saving options
+- `Spectral`: scan mode.
+- `Sampling`: `Uniform lambda` or `Uniform nu`, when supported by the installed SDK.
+- `Bands`: requested number of spectral bands. `0` lets the SDK use its recommended/default value.
+- `Avg`, `Bin`, and `Data`: averaging, binning, and export data type.
 
-Use the top-right `Light Mode` / `Dark Mode` button to switch the UI palette. Drag the vertical pane dividers to resize the left, center, and right areas.
+Some SDK versions or camera configurations may not support every setting. Unsupported/read-only settings are logged instead of stopping the whole app.
 
-Most controls activate without needing a separate Apply step. Buttons and checkboxes take focus when clicked and can be run again with Enter. Entry fields commit their matching action on Enter or when you leave the field, for example exposure/gain applies camera parameters, ROI fields apply ROI, stage speed applies motion settings, selected site edits are saved, and the hyperspectral band entry jumps to that band.
+## ROI
 
-## Background Logs
+ROI can be set by clicking two opposite corners in Live View or by editing width/height in the ROI panel. `Apply Box` uses the four corner fields, `Square` creates a square ROI from the selected box, and `Clear` returns to full-frame workflow.
 
-The app writes a full background log to `hera_app\output\hera_background_status.log` and a shorter crash/issue summary to `hera_app\output\hera_last_issues.log`. Use `Open Log` in the Status / Messages bar to open the short summary. The summary includes recent failures, current site/cycle/export state, a tail of recent messages, and unhandled Python/Tk/thread tracebacks when available.
+The app keeps the selected export/display ROI separate from SDK ROI readback because some HERA configurations report ROI as read-only or full-frame even when ROI-limited acquisition/export is working.
 
-## Live View ROI And Exposure Checks
+When the SDK returns a full-frame hypercube, the app can still crop the ENVI output and Hyperspectral View to the selected ROI so display and saved files match.
 
-The Live View tab includes controls for choosing an ROI and judging exposure before a hyperspectral acquisition.
+## Stage, XY Control, And Saved Sites
 
-- `Select ROI`: click two opposite corners on the live image. The app converts those clicks into image-pixel ROI values and fills the `ROI X`, `ROI Y`, `ROI W`, and `ROI H` parameter fields. That selected ROI is kept separately from the camera ROI readback, because some Hera devices report ROI as read-only/full-frame during hyperspectral acquisition.
-- Saved positions store the active ROI at the time you press `Add Current Position`, `Update Selected Position`, or `Save Selected Edits`. Selecting a saved position restores its ROI into the ROI controls. Manual site runs, `Run First 2 Sites`, and timelapse use the saved ROI for each site; sites without a saved ROI use the current timelapse-start ROI as a fallback, otherwise full frame.
-- `Use Corners`: reads the top-left and bottom-right corner fields and updates the rectangular Hera ROI. The other two corners are recalculated from that rectangle.
-- `Use Size`: reads `ROI X`, `ROI Y`, `ROI Width`, and `ROI Height`, then refreshes the corner fields and ROI area.
-- `Set Area`: creates a near-square ROI with the requested pixel area, centered around the current ROI.
-- `Clear ROI`: resets the ROI workflow to full-image export/display when a live frame is available.
-- `Auto Contrast`: display-only contrast stretching for the live preview. It helps make dim frames visible and does not change camera exposure, gain, or saved acquisition data.
-- `Show Saturation`: overlays saturated live-preview pixels in red using the saturation threshold returned by `HeraAPI_GetLiveCaptureInfo`.
-- `Cross`: enables a fixed green point on the live image and displays the selected row and column intensity cuts. The bottom plot shows the horizontal cut, the right plot shows the vertical cut, and the red line marks the SDK live-frame saturation threshold.
-- `Gamma`: display-only brightness response control applied after auto-contrast. `1.0` is neutral; higher values brighten shadows and lower values darken the display. `Reset Gamma` returns it to `1.0`.
-- `Snapshot`: saves the latest live frame as a PNG. The file uses the current display choices, so auto-contrast and the red saturation overlay are included when enabled. It saves the live image content, not the canvas text labels or ROI outline.
+The `Stage` tab shows stage connection status and live XY coordinates. `XY Control` can move to a target XY position or jog by the selected step size.
 
-The `Live View HDR` checkbox controls the camera HDR mode used by live preview. On the tested Hera Kinetix MC setup, the SDK accepts HDR for live frames (`Mono16`, HDR on), but hyperspectral data and hypercubes still report `HDR=off` through `HeraAPI_GetHyperspectralDataIsHDR` and `HeraAPI_GetHyperCubeIsHDR`. The app logs that downgrade and writes the actual hyperspectral HDR flag into the ENVI description, so saved cubes are not mislabeled as HDR.
+`Saved Sites` stores:
 
-The saving panel includes the output folder, optional export name/stamp, `_raw`/`_ref`/`_nrm` checkboxes, and a notes field. These settings control manual exports and auto-saved site/timelapse acquisitions; auto-saved runs check that at least one requested export product is possible before starting.
+- Site number.
+- Site name.
+- X/Y position.
+- Z placeholder value.
+- Active ROI at the time the site was added or updated.
 
-When an ROI is selected, the SDK acquisition may still run through the normal full-frame hyperspectral path. The app then exports the full cube temporarily, maps the saved live-frame ROI into the returned hypercube dimensions, crops the ENVI binary/header on disk to that ROI, and removes the temporary full-frame export. The Hyperspectral View uses the same scaled ROI by cropping each displayed SDK band in memory, so the viewer and saved `.hdr`/data file match.
+Z motion is currently disabled in the normal workflow. Saved sites keep a Z column for future integration, but timelapse movement is XY-only unless Z support is explicitly re-enabled later.
+
+The timelapse `Sites` field accepts `all`, comma-separated site numbers, and ranges such as `1-5`.
+
+## Acquisition And Timelapse
+
+`Start Single Acquisition` acquires the current position/ROI once.
+
+`Run One Loop` runs the selected sites once.
+
+`Run Timelapse` repeats selected-site loops. The `Interval (min)` value is the wait time from the end of one loop to the start of the next loop. The app also waits the configured `Dwell (s)` after moving to a site before starting acquisition.
+
+`Pause` pauses between acquisition steps and can be pressed again to resume. `Stop Timelapse` requests the timelapse worker to stop after the current safe point. `Abort Acquisition` is for the active HERA acquisition.
 
 ## Flatfield
 
-The Flatfield controls follow the original Hera Acquisition App concept: acquire a white diffusive surface as a baseline/reference, then use it to normalize later sample measurements. `Acquire` runs a normal Hera acquisition and stores the resulting hypercube as the flatfield reference. `Clear` removes it. The reference stays active until you acquire a new flatfield or clear it.
+`Flatfield Acquire` acquires a reference cube from the current ROI/position and stores it in memory as the active flatfield. `Import Ref` loads an already saved reference for later normalization. `Clear` removes the active flatfield.
 
-The Hyperspectral View `Show` menu has `Normalized`, `Raw`, and `Flatfield` modes. `Normalized` displays the current sample divided by the stored matching flatfield; `Raw` displays the native sample cube; `Flatfield` displays the stored reference cube. The right-side Export panel controls saved products: `_raw` writes the sample cube, `_ref` writes the matching flatfield reference, and `_nrm` writes a normalized cube where each sample pixel is divided by the matching flatfield pixel. `_ref` and `_nrm` are skipped when no compatible flatfield is loaded. After acquiring a flatfield, the same `Export` button saves it as `_ref` using the shared folder/name/stamp controls.
+After a compatible flatfield is active:
 
-The saving panel also includes a HyperLAB action. `Open in HyperLAB` resolves `C:\Users\Public\Desktop\Nireos HyperLAB.lnk` to the installed `HyperLAB.exe`, then starts HyperLAB with the current exported `.hdr`. If the app was restarted and no in-memory export path is available, it searches the output folder for the newest `_raw`, `_ref`, or `_nrm` header and uses that. The path is also copied to the clipboard.
+- Hyperspectral View can display `Normalized`, `Raw`, or `Flatfield`.
+- `_raw` saves the sample cube.
+- `_ref` saves the active matching reference.
+- `_nrm` saves sample divided by the matching reference.
 
-Exports are ENVI header/data-file pairs. The SDK may write the binary data file without an extension, so the app patches each header with `file type = ENVI Standard` and `data file = ...` after export or ROI crop. Keep the `.hdr` and matching data file together when moving a measurement folder.
+Export choices are independent of the current Hyperspectral View display mode. If a product is not selected, it is not saved.
 
-## Saved Positions, ROI, And Dummy Z
+## Export And Logs
 
-The saved positions table starts empty. There is no automatic `Start`/`0,0` site; add the first site from the current stage position before running a site, the first-two-sites check, or a timelapse.
+The `Export` panel controls saving folder, file name, optional timestamp, data products, and notes. Notes are written into ENVI descriptions/metadata; they are not shown as a separate image overlay.
 
-Saved XYZ positions also store the active ROI. Set or select the ROI first, then add or update the position. The saved positions table shows whether each site has an ROI, and selecting a site restores its saved ROI into the controls.
+The app writes logs in the selected/default output folder:
 
-Saved XYZ positions no longer depend on a successful NIS Z bridge read. If a cached real Z value is available it is used; otherwise the app saves `Z=0.000` as a dummy placeholder so XY site saving remains usable while Z integration is being debugged.
+```text
+hera_background_status.log
+hera_last_issues.log
+hera_fatal_crash.log
+helper_cache\
+```
 
-## NIS Z Bridge
+Use `Open Log` in `Run Status` to open the short issue summary. The full background log is useful for timing acquisition, computing, saving, movement, retry, and SDK callback events.
 
-NIS Z bridge files are private, machine-specific, and intentionally not tracked in this GitHub repository. Keep any local bridge scripts outside Git tracking, for example in the local `NIS-Z-Bridge/` folder or the NIS PC bridge folder.
+`Open in HyperLAB` opens every `.hdr` that was actually saved in the most recent export, for example `_raw`, `_ref`, and `_nrm` when all three were selected and successfully written. If there is no remembered export from the current session, it falls back to the newest export header in the output folder.
 
-## Notes
+## Local-Only Files
 
-- Some camera parameters, such as gain or ROI, may be read-only depending on the connected hardware configuration.
-- The app logs read-only parameters instead of failing the entire acquisition sequence. When live view is active, parameter apply is handled in a background worker so the UI does not freeze while the SDK stops and restarts live capture.
-- ENVI exports are written to the selected output directory.
-- The app has been validated against a working acquisition flow where raw data and hypercube export complete successfully.
-- No local device-configuration folder was found in this workspace, so those files are not bundled automatically.
+The following are private/local working materials and are intentionally ignored by Git:
 
-## Publishing To GitHub
+- `NIS-Z-Bridge/`
+- `design_previews/`
+- `AGENDA.md`
+- runtime caches such as `__pycache__/`
+- output data and logs
 
-Once Git is installed and available on `PATH`, you can publish this folder with:
+Keep generated ENVI data outside the Git repository, normally in `C:\BIOS DATA\jiayi\APP`.
+
+## Development Notes
+
+- Keep app logic in `hera_app/`; do not add logic to the launcher.
+- Prefer editing the relevant mixin/controller directly.
+- Preserve user data and local-only folders.
+- For Python code changes, run `python -m py_compile` on touched Python files.
+- For UI/hardware changes, verify manually in the app and inspect `hera_background_status.log`.
+
+## GitHub Workflow
+
+For normal maintenance:
 
 ```powershell
-cd "c:\BIOS DATA\Lina\PYTHON\hera-trigger-app"
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin <your-github-repo-url>
-git push -u origin main
+cd "C:\BIOS DATA\Lina\PYTHON\hera-trigger-app"
+git status
+git add <changed-files>
+git commit -m "<area>: <summary>"
+git push
 ```
 
 ## License
 
-No open-source license file has been added yet. Choose a license before publishing if you want others to reuse the code under defined terms.
+No open-source license file has been added yet. Add one before distributing the code for reuse outside the project.

@@ -1302,20 +1302,26 @@ class UIBuilderMixin:
             self.log(f"Open in HyperLAB failed: shortcut not found: {shortcut_path}")
             return
 
-        hdr_path = self._current_or_latest_export_hdr()
+        hdr_paths = self._current_or_latest_export_hdrs()
         try:
-            launch_path = self._start_hyperlab(shortcut_path, hdr_path)
-            if hdr_path:
-                self._copy_last_export_path_to_clipboard(hdr_path)
-                self.log(f"Started HyperLAB with export: {hdr_path}")
+            launch_path = self._start_hyperlab(shortcut_path, hdr_paths)
+            if hdr_paths:
+                self._copy_export_paths_to_clipboard(hdr_paths)
+                if len(hdr_paths) == 1:
+                    self.log(f"Started HyperLAB with export: {hdr_paths[0]}")
+                else:
+                    self.log(f"Started HyperLAB with {len(hdr_paths)} exports: {', '.join(os.path.basename(path) for path in hdr_paths)}")
             else:
                 self.log(f"Started HyperLAB from: {launch_path}")
         except Exception as exc:
             try:
                 os.startfile(shortcut_path)
-                if hdr_path:
-                    self._copy_last_export_path_to_clipboard(hdr_path)
-                    self.log(f"Requested HyperLAB launch from shortcut. Last export path copied to clipboard: {hdr_path}")
+                if hdr_paths:
+                    self._copy_export_paths_to_clipboard(hdr_paths)
+                    self.log(
+                        "Requested HyperLAB launch from shortcut. "
+                        f"{len(hdr_paths)} export path(s) copied to clipboard."
+                    )
                 else:
                     self.log("Requested HyperLAB launch from shortcut.")
             except Exception as fallback_exc:
@@ -1324,8 +1330,13 @@ class UIBuilderMixin:
                 self.log(f"Open in HyperLAB failed: {exc}; fallback failed: {fallback_exc}")
 
     def _current_or_latest_export_hdr(self):
-        if self.last_export_path and os.path.exists(self.last_export_path):
-            return self.last_export_path
+        hdr_paths = self._current_or_latest_export_hdrs()
+        return hdr_paths[0] if hdr_paths else ""
+
+    def _current_or_latest_export_hdrs(self):
+        current_paths = self._last_saved_export_hdrs()
+        if current_paths:
+            return current_paths
 
         output_root = ""
         try:
@@ -1334,12 +1345,30 @@ class UIBuilderMixin:
             output_root = ""
         latest_hdr_path = self._find_latest_export_hdr(output_root)
         if latest_hdr_path:
-            self.last_export_path = latest_hdr_path
+            self._record_saved_export_paths({"latest": latest_hdr_path}, latest_hdr_path)
             try:
                 self.last_export_var.set(os.path.basename(latest_hdr_path))
             except Exception:
                 pass
-        return latest_hdr_path
+            return [latest_hdr_path]
+        return []
+
+    def _last_saved_export_hdrs(self):
+        paths = []
+        saved_paths = getattr(self, "last_export_paths", None) or {}
+        for key in getattr(self, "EXPORT_PRODUCT_ORDER", ("raw", "ref", "nrm")):
+            path = saved_paths.get(key)
+            if path and os.path.exists(path):
+                paths.append(path)
+        for key, path in saved_paths.items():
+            if key not in getattr(self, "EXPORT_PRODUCT_ORDER", ("raw", "ref", "nrm")) and path and os.path.exists(path):
+                paths.append(path)
+        if paths:
+            return paths
+        path = getattr(self, "last_export_path", "")
+        if path and os.path.exists(path):
+            return [path]
+        return []
 
     def _find_latest_export_hdr(self, output_root):
         if not output_root or not os.path.isdir(output_root):
@@ -1365,6 +1394,11 @@ class UIBuilderMixin:
         return newest_path
 
     def _start_hyperlab(self, shortcut_path, hdr_path=None):
+        if isinstance(hdr_path, (list, tuple)):
+            return self._start_hyperlab_for_paths(shortcut_path, hdr_path)
+        return self._start_hyperlab_for_paths(shortcut_path, [hdr_path] if hdr_path else [])
+
+    def _start_hyperlab_for_paths(self, shortcut_path, hdr_paths=None):
         launch_path, working_dir = self._resolve_hyperlab_launch_target(shortcut_path)
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         if launch_path.lower().endswith(".lnk"):
@@ -1375,9 +1409,8 @@ class UIBuilderMixin:
             raise FileNotFoundError(launch_path)
 
         cwd = working_dir if working_dir and os.path.isdir(working_dir) else os.path.dirname(launch_path)
-        args = [launch_path]
-        if hdr_path and os.path.exists(hdr_path):
-            args.append(hdr_path)
+        existing_hdr_paths = [path for path in (hdr_paths or []) if path and os.path.exists(path)]
+        args = [launch_path] + existing_hdr_paths
         subprocess.Popen(args, cwd=cwd or None, creationflags=creationflags)
         return launch_path
 
@@ -1437,5 +1470,8 @@ class UIBuilderMixin:
         return target_path, working_dir
 
     def _copy_last_export_path_to_clipboard(self, hdr_path):
+        self._copy_export_paths_to_clipboard([hdr_path] if hdr_path else [])
+
+    def _copy_export_paths_to_clipboard(self, hdr_paths):
         self.clipboard_clear()
-        self.clipboard_append(hdr_path)
+        self.clipboard_append("\n".join(path for path in hdr_paths if path))

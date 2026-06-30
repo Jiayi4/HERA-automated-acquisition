@@ -7,6 +7,32 @@ from pathlib import Path
 
 
 class ExportMixin:
+    EXPORT_PRODUCT_ORDER = ("raw", "ref", "nrm")
+
+    def _record_saved_export_paths(self, saved_paths, preferred_path=None):
+        cleaned = {}
+        for key in self.EXPORT_PRODUCT_ORDER:
+            path = (saved_paths or {}).get(key)
+            if path and os.path.exists(path):
+                cleaned[key] = path
+        for key, path in (saved_paths or {}).items():
+            if key not in cleaned and path and os.path.exists(path):
+                cleaned[key] = path
+
+        self.last_export_paths = cleaned
+        self.last_export_path = (
+            preferred_path
+            or cleaned.get("nrm")
+            or cleaned.get("raw")
+            or cleaned.get("ref")
+            or next(iter(cleaned.values()), "")
+        )
+        return self.last_export_path
+
+    def _clear_saved_export_paths(self):
+        self.last_export_path = ""
+        self.last_export_paths = {}
+
     def _sanitize_export_tag(self, text):
         keep = []
         for ch in text:

@@ -167,6 +167,7 @@ class HeraTriggerApp(
         self.acquisition_done_event = threading.Event()
         self.acquisition_success = False
         self.last_export_path = ""
+        self.last_export_paths = {}
         self.last_acquisition_error = ""
         self.trigger_log = []
         self.dll_path_var = tk.StringVar(value=HeraController.default_dll_path())

@@ -1050,7 +1050,7 @@ class AcquisitionMixin:
                 or direct_saved_paths.get("ref")
                 or ""
             )
-            self.last_export_path = preferred_path
+            self._record_saved_export_paths(direct_saved_paths, preferred_path)
             if preferred_path:
                 self._set_var_async(self.last_export_var, os.path.basename(preferred_path))
             self._set_var_async(
@@ -1198,7 +1198,7 @@ class AcquisitionMixin:
                     description,
                     self.current_hypercube_info,
                 )
-            self.last_export_path = hdr_path
+            self._record_saved_export_paths(saved_paths, hdr_path)
             self.pending_save_context = None
             self._set_var_async(self.last_export_var, os.path.basename(hdr_path))
             self._log_async(
@@ -1354,7 +1354,7 @@ class AcquisitionMixin:
 
         self.acquisition_done_event.clear()
         self.acquisition_success = False
-        self.last_export_path = ""
+        self._clear_saved_export_paths()
         self.last_acquisition_error = ""
         self.pending_export_tag = export_tag
         self.pending_acquisition_role = acquisition_role
@@ -1736,7 +1736,7 @@ class AcquisitionMixin:
                         description,
                         sample_info,
                     )
-                self.last_export_path = hdr_path
+                self._record_saved_export_paths(saved_paths, hdr_path)
                 self._set_var_async(self.last_export_var, os.path.basename(hdr_path))
                 self._log_async(
                     ("Saved flatfield folder: " if role == "flatfield" else "Saved measurement folder: ")
@@ -2349,7 +2349,7 @@ class AcquisitionMixin:
                     description,
                     self.current_hypercube_info,
                 )
-            self.last_export_path = hdr_path
+            self._record_saved_export_paths(saved_paths, hdr_path)
             self._set_var_async(self.last_export_var, os.path.basename(hdr_path))
             self._log_async(
                 "Saved measurement folder: "
