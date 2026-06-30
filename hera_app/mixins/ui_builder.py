@@ -208,6 +208,12 @@ class UIBuilderMixin:
             return self.apply_selected_position_edits
         if self._var_matches(var_name, self.stage_speed_var):
             return self.apply_stage_motion_settings
+        if self._var_matches(var_name, getattr(self, "xy_target_x_var", None), getattr(self, "xy_target_y_var", None)):
+            if for_focusout:
+                return None
+            return self.go_to_stage_xy
+        if self._var_matches(var_name, getattr(self, "xy_step_var", None)):
+            return None
         if self._var_matches(var_name, self.hyper_band_jump_var):
             return self.jump_to_hyper_band
         return None
@@ -432,6 +438,39 @@ class UIBuilderMixin:
         self.current_y_label = tk.Label(live_xy, text="Y: -", fg=self.theme["success"])
         self.current_x_label.pack(side="left", padx=(0, 4))
         self.current_y_label.pack(side="left")
+
+        xy_control = tk.LabelFrame(stage_tab, text="XY Control", padx=5, pady=4)
+        xy_control.pack(fill="x", pady=(0, 6))
+        self.xy_target_x_var = tk.StringVar(value="")
+        self.xy_target_y_var = tk.StringVar(value="")
+        self.xy_step_var = tk.StringVar(value="0.1")
+        target_row = tk.Frame(xy_control)
+        target_row.pack(fill="x", pady=(0, 4))
+        tk.Label(target_row, text="Target X").pack(side="left", padx=(0, 3))
+        tk.Entry(target_row, textvariable=self.xy_target_x_var, width=7).pack(side="left", padx=(0, 4))
+        tk.Label(target_row, text="Y").pack(side="left", padx=(0, 3))
+        tk.Entry(target_row, textvariable=self.xy_target_y_var, width=7).pack(side="left", padx=(0, 4))
+        go_xy_button = tk.Button(target_row, text="Go To XY", command=self.go_to_stage_xy, width=8)
+        go_xy_button._hera_control_bar_button = True
+        go_xy_button.pack(side="left", fill="x", expand=True)
+        jog_row = tk.Frame(xy_control)
+        jog_row.pack(fill="x")
+        tk.Label(jog_row, text="Step").pack(side="left", padx=(0, 2))
+        tk.Entry(jog_row, textvariable=self.xy_step_var, width=4).pack(side="left", padx=(0, 3))
+        for text, command in (
+            ("X-", lambda: self.jog_stage_xy(-1, 0)),
+            ("X+", lambda: self.jog_stage_xy(1, 0)),
+            ("Y-", lambda: self.jog_stage_xy(0, -1)),
+            ("Y+", lambda: self.jog_stage_xy(0, 1)),
+        ):
+            button = tk.Button(jog_row, text=text, command=command, width=2)
+            button._hera_control_bar_button = True
+            button.pack(side="left", padx=(0, 1))
+            self.stage_xy_motion_buttons.append(button)
+        self.stage_xy_stop_button = tk.Button(jog_row, text="Stop XY", command=self.stop_stage_xy_motion, state="disabled", width=7)
+        self.stage_xy_stop_button._hera_control_bar_button = True
+        self.stage_xy_stop_button.pack(side="left", padx=(1, 0))
+        self.stage_xy_motion_buttons.append(go_xy_button)
 
         saved = tk.LabelFrame(stage_tab, text="Saved Sites", padx=6, pady=5)
         saved.pack(fill="x", pady=(0, 6))
@@ -848,6 +887,17 @@ class UIBuilderMixin:
                     button.config(state=state)
                 except Exception:
                     pass
+        for button in getattr(self, "stage_xy_motion_buttons", []):
+            try:
+                button.config(state=state)
+            except Exception:
+                pass
+        stop_button = getattr(self, "stage_xy_stop_button", None)
+        if stop_button:
+            try:
+                stop_button.config(state="normal" if getattr(self, "stage_motion_inflight", False) else "disabled")
+            except Exception:
+                pass
 
     def _build_hera_ui(self, parent):
         frame = tk.LabelFrame(parent, text="Hera Acquisition", padx=8, pady=8)

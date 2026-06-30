@@ -76,7 +76,7 @@ class HeraTriggerApp(
     @classmethod
     def hdr_mode_text(cls, enabled, short=False):
         if enabled is None:
-            return "unknown"
+            return "Unknown"
         if bool(enabled):
             return cls.HDR_DYNAMIC_RANGE_SHORT_TEXT if short else cls.HDR_DYNAMIC_RANGE_TEXT
         return cls.HDR_SENSITIVITY_TEXT
@@ -84,8 +84,35 @@ class HeraTriggerApp(
     @classmethod
     def hdr_status_text(cls, enabled):
         if enabled is None:
-            return "HDR mode: unknown"
+            return "HDR mode: Unknown"
         return f"HDR mode: {cls.hdr_mode_text(enabled)}"
+
+    @staticmethod
+    def _capitalize_status_lead(text):
+        display_text = str(text or "")
+        if not display_text:
+            return display_text
+        leading_spaces = len(display_text) - len(display_text.lstrip())
+        if leading_spaces >= len(display_text):
+            return display_text
+        first = display_text[leading_spaces]
+        if first.isalpha() and not (len(display_text) > leading_spaces + 1 and display_text[leading_spaces + 1] == "="):
+            return f"{display_text[:leading_spaces]}{first.upper()}{display_text[leading_spaces + 1:]}"
+        return display_text
+
+    @classmethod
+    def _format_status_display_text(cls, text):
+        display_text = str(text or "").strip()
+        if not display_text:
+            return "-"
+        if ":" in display_text:
+            prefix, value = display_text.split(":", 1)
+            prefix = cls._capitalize_status_lead(prefix.strip())
+            value = value.strip()
+            if not value:
+                return f"{prefix}:"
+            return f"{prefix}: {cls._capitalize_status_lead(value)}"
+        return cls._capitalize_status_lead(display_text)
 
     @staticmethod
     def default_tango_dll_path():
@@ -134,6 +161,7 @@ class HeraTriggerApp(
         self.next_loop_deadline = None
         self.acquisition_inflight = False
         self.stage_motion_inflight = False
+        self.stage_motion_stop_requested = False
         self.acquisition_watchdog_token = 0
         self.acquisition_heartbeat_token = 0
         self.acquisition_done_event = threading.Event()
@@ -307,6 +335,8 @@ class HeraTriggerApp(
         self.flatfield_use_current_button = None
         self.flatfield_clear_button = None
         self.start_acquisition_buttons = []
+        self.stage_xy_motion_buttons = []
+        self.stage_xy_stop_button = None
         self.current_hyper_band_index = tk.IntVar(value=0)
         self.hyper_band_jump_var = tk.StringVar(value="1")
         self.current_hyper_wavelength_var = tk.StringVar(value="Wavelength: -")
@@ -331,6 +361,7 @@ class HeraTriggerApp(
         self.dummy_z_position = 0.0
         self._configure_theme()
         self._build_ui()
+        self._install_status_text_traces()
         self.refresh_positions_tree()
         self.update_state("Idle")
         self._start_ui_call_queue_pump()
@@ -342,6 +373,51 @@ class HeraTriggerApp(
 
     def _live_cursor_status_text(self, text):
         return f"{text:<48}"[:48]
+
+    def _install_status_text_traces(self):
+        self._status_text_trace_active = set()
+        self._status_text_trace_installed = set()
+        for attr in (
+            "license_var",
+            "timelapse_status_var",
+            "time_remaining_var",
+            "center_stage_summary_var",
+            "hypercube_summary_var",
+            "live_view_status_var",
+            "live_profile_status_var",
+            "live_roi_status_var",
+            "flatfield_status_var",
+            "nis_z_current_z_var",
+            "nis_z_status_var",
+            "hdr_status_var",
+            "stage_status_var",
+            "stage_status_display_var",
+            "app_state_var",
+            "run_progress_text_var",
+        ):
+            var = getattr(self, attr, None)
+            if not isinstance(var, tk.StringVar):
+                continue
+            key = str(var)
+            if key in self._status_text_trace_installed:
+                continue
+            self._status_text_trace_installed.add(key)
+            var.trace_add("write", lambda *_args, _var=var: self._normalize_status_text_var(_var))
+            self._normalize_status_text_var(var)
+
+    def _normalize_status_text_var(self, var):
+        key = str(var)
+        if key in getattr(self, "_status_text_trace_active", set()):
+            return
+        current = var.get()
+        formatted = self._format_status_display_text(current)
+        if formatted == current:
+            return
+        self._status_text_trace_active.add(key)
+        try:
+            var.set(formatted)
+        finally:
+            self._status_text_trace_active.discard(key)
 
     def _on_live_roi_status_changed(self, *_args):
         text = self.live_roi_status_var.get()

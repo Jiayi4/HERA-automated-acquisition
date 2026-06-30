@@ -372,18 +372,52 @@ class StageMixin:
             self.log(f"Failed to delete position: {exc}")
             self.update_state("Error")
 
-    def goto_selected_position(self):
+    def _parse_stage_float(self, var, label):
         try:
-            position = self._get_selected_position()
+            return float(var.get())
         except Exception as exc:
-            self.log(f"Failed to go to selected position: {exc}")
+            raise RuntimeError(f"Enter a valid {label}.") from exc
+
+    def go_to_stage_xy(self):
+        try:
+            target_x = self._parse_stage_float(self.xy_target_x_var, "Target X")
+            target_y = self._parse_stage_float(self.xy_target_y_var, "Target Y")
+        except Exception as exc:
+            self.log(f"Go To XY ignored: {exc}")
             self.update_state("Error")
             return
-        if getattr(self, "stage_motion_inflight", False):
-            self.log("Go to selected position ignored because stage motion is still in progress.")
-            return
+        self._move_stage_to_xy_async(target_x, target_y, f"XY target X={target_x:.3f}, Y={target_y:.3f}")
 
+    def jog_stage_xy(self, direction_x, direction_y):
+        if getattr(self, "stage_motion_inflight", False):
+            self.log("XY jog ignored because stage motion is still in progress.")
+            return
+        try:
+            step = self._parse_stage_float(self.xy_step_var, "step size")
+            if step <= 0:
+                raise RuntimeError("Step size must be greater than zero.")
+            if not self.tango or not self.tango.connected:
+                raise RuntimeError("Connect the stage before moving.")
+            with self.stage_lock:
+                current_x, current_y, _, _ = self.tango.get_position()
+            target_x = current_x + (float(direction_x) * step)
+            target_y = current_y + (float(direction_y) * step)
+            self.xy_target_x_var.set(f"{target_x:.3f}")
+            self.xy_target_y_var.set(f"{target_y:.3f}")
+        except Exception as exc:
+            self.log(f"XY jog ignored: {exc}")
+            self.update_state("Error")
+            return
+        axis = "X" if direction_x else "Y"
+        sign = "+" if (direction_x or direction_y) > 0 else "-"
+        self._move_stage_to_xy_async(target_x, target_y, f"{axis}{sign} jog ({step:.3f})")
+
+    def _move_stage_to_xy_async(self, target_x, target_y, label):
+        if getattr(self, "stage_motion_inflight", False):
+            self.log(f"{label} ignored because stage motion is still in progress.")
+            return
         self.stage_motion_inflight = True
+        self.stage_motion_stop_requested = False
         self._refresh_run_action_controls()
 
         def worker():
@@ -395,19 +429,49 @@ class StageMixin:
                     if speed_xy <= 0:
                         raise RuntimeError("Stage speed must be greater than zero.")
                     self.tango.apply_motion_settings(speed_xy=speed_xy, accel_xy=1.0, secure_vel_xy=50.0)
-                    self._log_async(f"Moving to {position.name}.")
-                    self.tango.move_absolute_xy(position.x, position.y)
+                    self._log_async(f"Moving stage to {label}.")
+                    self.tango.move_absolute_xy(float(target_x), float(target_y))
                     self.tango.wait_for_xy_stop(60000)
                     self._safe_after(0, self.update_stage_position_display)
-                self._log_async(f"Reached {position.name}.")
+                if getattr(self, "stage_motion_stop_requested", False):
+                    self._log_async("Stage XY motion stopped.")
+                else:
+                    self._log_async(f"Reached {label}.")
             except Exception as exc:
-                self._log_async(f"Failed to go to selected position: {exc}")
+                self._log_async(f"Stage XY move failed: {exc}")
                 self._safe_after(0, lambda: self.update_state("Error"))
             finally:
                 self.stage_motion_inflight = False
+                self.stage_motion_stop_requested = False
                 self._safe_after(0, self._refresh_run_action_controls)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def stop_stage_xy_motion(self):
+        if not self.tango or not self.tango.connected:
+            self.log("Connect the stage before stopping XY motion.")
+            return
+        self.stage_motion_stop_requested = True
+
+        def worker():
+            try:
+                self.tango.stop_axes()
+                self._log_async("Stop XY requested.")
+                self._safe_after(0, self.update_stage_position_display)
+            except Exception as exc:
+                self._log_async(f"Failed to stop XY motion: {exc}")
+                self._safe_after(0, lambda: self.update_state("Error"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def goto_selected_position(self):
+        try:
+            position = self._get_selected_position()
+        except Exception as exc:
+            self.log(f"Failed to go to selected position: {exc}")
+            self.update_state("Error")
+            return
+        self._move_stage_to_xy_async(position.x, position.y, position.name)
 
     def manual_trigger_selected_position(self):
         try:

@@ -247,7 +247,10 @@ class DeviceMixin:
                 if clear_cached_data:
                     self._clear_hypercube_viewer()
                     self.clear_flatfield()
-                self.license_var.set("Unknown")
+                if clear_cached_data or not self.license_ok_seen:
+                    self._set_license_status_text("Unknown")
+                else:
+                    self._set_license_status_text("Licensed (cached)")
                 self.hdr_status_var.set(self.hdr_status_text(None))
                 if clear_cached_data:
                     self.hdr_enabled_var.set(False)
@@ -636,6 +639,8 @@ class DeviceMixin:
         display_text = str(text or "").strip()
         if display_text == "Licensed":
             return "Valid"
+        if display_text in {"Licensed (cached)", "Valid (cached)"}:
+            return "Valid (cached)"
         if display_text == "Not licensed":
             return "Invalid"
         return display_text or "-"
