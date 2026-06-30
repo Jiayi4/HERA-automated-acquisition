@@ -410,7 +410,18 @@ def read_file_backed_band(flat_info, band_index):
     return values
 
 
-def write_sdk_hypercube_envi(controller, hypercube_handle, output_base_path, description, width, height, bands, cube_type, emit_func=emit):
+def write_sdk_hypercube_envi(
+    controller,
+    hypercube_handle,
+    output_base_path,
+    description,
+    width,
+    height,
+    bands,
+    cube_type,
+    emit_func=emit,
+    progress_product=None,
+):
     raw_path = output_base_path
     hdr_path = output_base_path + ".hdr"
     temp_suffix = f".tmp_{uuid.uuid4().hex[:8]}"
@@ -431,7 +442,7 @@ def write_sdk_hypercube_envi(controller, hypercube_handle, output_base_path, des
                 wavelengths.append(float(wavelength))
                 if band_index == 0 or (band_index + 1) % 25 == 0 or band_index + 1 == int(bands):
                     pct = int(round((band_index + 1) * 100 / int(bands)))
-                    emit_func("progress", phase="direct_saving", percent=pct)
+                    emit_func("progress", phase="direct_saving", product=progress_product, percent=pct)
         write_envi_header(temp_hdr_path, raw_path, description, width, height, bands, envi_data_type(cube_type), wavelengths)
         os.replace(temp_raw_path, raw_path)
         final_raw_replaced = True
@@ -444,7 +455,7 @@ def write_sdk_hypercube_envi(controller, hypercube_handle, output_base_path, des
         raise
 
 
-def write_file_backed_hypercube_envi(flat_info, output_base_path, description, roi=None, emit_func=emit):
+def write_file_backed_hypercube_envi(flat_info, output_base_path, description, roi=None, emit_func=emit, progress_product=None):
     raw_path = output_base_path
     hdr_path = output_base_path + ".hdr"
     temp_suffix = f".tmp_{uuid.uuid4().hex[:8]}"
@@ -470,7 +481,7 @@ def write_file_backed_hypercube_envi(flat_info, output_base_path, description, r
                     raw_file.write(source_file.read(row_bytes))
                 if band_index == 0 or (band_index + 1) % 25 == 0 or band_index + 1 == bands:
                     pct = int(round((band_index + 1) * 100 / bands))
-                    emit_func("progress", phase="direct_saving", percent=pct)
+                    emit_func("progress", phase="direct_saving", product=progress_product, percent=pct)
         wavelength_list = [
             float(wavelengths[index]) if index < len(wavelengths) else float(index)
             for index in range(bands)
@@ -487,7 +498,18 @@ def write_file_backed_hypercube_envi(flat_info, output_base_path, description, r
         raise
 
 
-def write_normalized_envi(controller, hypercube_handle, flat_info, alignment, output_base_path, description, bands, cube_type, emit_func=emit):
+def write_normalized_envi(
+    controller,
+    hypercube_handle,
+    flat_info,
+    alignment,
+    output_base_path,
+    description,
+    bands,
+    cube_type,
+    emit_func=emit,
+    progress_product=None,
+):
     raw_path = output_base_path
     hdr_path = output_base_path + ".hdr"
     temp_suffix = f".tmp_{uuid.uuid4().hex[:8]}"
@@ -531,7 +553,7 @@ def write_normalized_envi(controller, hypercube_handle, flat_info, alignment, ou
                 wavelengths.append(float(wavelength))
                 if band_index == 0 or (band_index + 1) % 10 == 0 or band_index + 1 == int(bands):
                     pct = int(round((band_index + 1) * 100 / int(bands)))
-                    emit_func("progress", phase="direct_saving", percent=pct)
+                    emit_func("progress", phase="direct_saving", product=progress_product, percent=pct)
 
         write_envi_header(temp_hdr_path, raw_path, description, roi_w, roi_h, bands, 4, wavelengths)
         os.replace(temp_raw_path, raw_path)
@@ -571,6 +593,7 @@ def direct_save_measurement(controller, hypercube_handle, request, cube_width, c
 
     if export_raw:
         raw_path = f"{output_base_path}_raw"
+        emit_func("progress", phase="direct_saving", product="raw", percent=0)
         saved_paths["raw"] = write_sdk_hypercube_envi(
             controller,
             hypercube_handle,
@@ -581,18 +604,21 @@ def direct_save_measurement(controller, hypercube_handle, request, cube_width, c
             cube_bands,
             cube_type,
             emit_func=emit_func,
+            progress_product="raw",
         )
         emit_func("log", message=f"Helper direct-saved native measurement (_raw): {saved_paths['raw']}")
 
     if export_ref:
         if alignment:
             ref_path = f"{output_base_path}_ref"
+            emit_func("progress", phase="direct_saving", product="ref", percent=0)
             saved_paths["ref"] = write_file_backed_hypercube_envi(
                 flat_info,
                 ref_path,
                 f"{description}\nFlatfield reference (_ref)",
                 alignment["flatfield_roi"],
                 emit_func=emit_func,
+                progress_product="ref",
             )
             emit_func("log", message=f"Helper direct-saved flatfield reference (_ref): {saved_paths['ref']}")
         else:
@@ -601,6 +627,7 @@ def direct_save_measurement(controller, hypercube_handle, request, cube_width, c
     if export_nrm:
         if alignment:
             nrm_path = f"{output_base_path}_nrm"
+            emit_func("progress", phase="direct_saving", product="nrm", percent=0)
             saved_paths["nrm"] = write_normalized_envi(
                 controller,
                 hypercube_handle,
@@ -611,6 +638,7 @@ def direct_save_measurement(controller, hypercube_handle, request, cube_width, c
                 cube_bands,
                 cube_type,
                 emit_func=emit_func,
+                progress_product="nrm",
             )
             emit_func("log", message=f"Helper direct-saved normalized measurement (_nrm): {saved_paths['nrm']}")
         else:

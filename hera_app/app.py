@@ -123,6 +123,7 @@ class HeraTriggerApp(
         self.parameter_apply_lock = threading.Lock()
         self.app_state = self.STATE_LABELS["Idle"]
         self.stage_poll_job = None
+        self.stage_poll_inflight = False
         self._auto_apply_parameters_job = None
         self.timelapse_thread = None
         self.timelapse_stop_event = threading.Event()
@@ -154,7 +155,7 @@ class HeraTriggerApp(
         self.center_stage_summary_var = tk.StringVar(value="Selected position: none")
         self.current_cycle_var = tk.StringVar(value="-")
         self.current_site_var = tk.StringVar(value="-")
-        self.last_export_var = tk.StringVar(value="Last export: -")
+        self.last_export_var = tk.StringVar(value="-")
         self.run_progress_var = tk.DoubleVar(value=0.0)
         self.run_progress_text_var = tk.StringVar(value="Progress: idle")
         self.run_progress_mode = "determinate"
@@ -216,6 +217,10 @@ class HeraTriggerApp(
         self._live_crop_offset = (0, 0)
         self.live_roi_button_var = tk.StringVar(value="Select ROI")
         self.live_roi_status_var = tk.StringVar(value="ROI: -")
+        self.live_roi_status_prefix_var = tk.StringVar(value="ROI:")
+        self.live_roi_status_value_var = tk.StringVar(value="-")
+        self.live_roi_status_value_labels = []
+        self.live_roi_status_var.trace_add("write", self._on_live_roi_status_changed)
         self.latest_stage_xy = None
         self.live_pixel_format_name = "Unknown"
         self.saving_notes_var = tk.StringVar(value="")
@@ -238,6 +243,7 @@ class HeraTriggerApp(
         self.helper_acquisition_enabled = True
         self.helper_acquisition_process = None
         self.helper_acquisition_request_id = None
+        self.helper_acquisition_abort_expected = False
         self.helper_acquisition_timeout_sec = 900
         self.helper_process_timeout_sec = 1200
         self.hera_service_client = None
@@ -334,6 +340,24 @@ class HeraTriggerApp(
 
     def _live_cursor_status_text(self, text):
         return f"{text:<48}"[:48]
+
+    def _on_live_roi_status_changed(self, *_args):
+        text = self.live_roi_status_var.get()
+        if ":" in text:
+            prefix, value = text.split(":", 1)
+            prefix = f"{prefix}:"
+            value = value.strip() or "-"
+        else:
+            prefix = ""
+            value = text.strip() or "-"
+        self.live_roi_status_prefix_var.set(prefix)
+        self.live_roi_status_value_var.set(value)
+        value_color = self.theme["success"] if prefix == "Active ROI:" else self.theme["muted"]
+        for label in getattr(self, "live_roi_status_value_labels", []):
+            try:
+                label.config(fg=value_color)
+            except Exception:
+                pass
 
     def update_state(self, state_key):
         label = self.STATE_LABELS.get(state_key, state_key)

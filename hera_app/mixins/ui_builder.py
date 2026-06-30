@@ -384,7 +384,19 @@ class UIBuilderMixin:
         tk.Button(roi_actions, text="Square", command=self.apply_square_roi_from_corners).pack(side="left", padx=(0, 3))
         tk.Button(roi_actions, textvariable=self.live_roi_button_var, command=self.toggle_live_roi_selection).pack(side="left", padx=(0, 3))
         tk.Button(roi_actions, text="Clear", command=self.clear_live_roi_selection).pack(side="left")
-        tk.Label(roi, textvariable=self.live_roi_status_var, fg=self.theme["muted"], wraplength=215, justify="left").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        roi_status = tk.Frame(roi)
+        roi_status.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        tk.Label(roi_status, textvariable=self.live_roi_status_prefix_var, fg=self.theme["muted"]).pack(side="left")
+        roi_status_value = tk.Label(
+            roi_status,
+            textvariable=self.live_roi_status_value_var,
+            fg=self.theme["muted"],
+            wraplength=145,
+            justify="left",
+            anchor="w",
+        )
+        roi_status_value.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        self.live_roi_status_value_labels.append(roi_status_value)
 
         advanced = tk.LabelFrame(camera_tab, text="Advanced", padx=6, pady=5)
         advanced.pack(fill="x", pady=(0, 6))
@@ -404,8 +416,8 @@ class UIBuilderMixin:
         live_xy = tk.Frame(xyz)
         live_xy.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         tk.Label(live_xy, text="Live XY:", fg=self.theme["muted"]).pack(side="left")
-        self.current_x_label = tk.Label(live_xy, text="X: -")
-        self.current_y_label = tk.Label(live_xy, text="Y: -")
+        self.current_x_label = tk.Label(live_xy, text="X: -", fg=self.theme["success"])
+        self.current_y_label = tk.Label(live_xy, text="Y: -", fg=self.theme["success"])
         self.current_x_label.pack(side="left", padx=(6, 4))
         self.current_y_label.pack(side="left")
 
@@ -919,8 +931,8 @@ class UIBuilderMixin:
         tk.Label(frame, textvariable=self.stage_status_var, font=("Segoe UI", 10, "bold")).grid(row=4, column=0, sticky="w", pady=(12, 0))
         tk.Label(frame, textvariable=self.stage_version_var).grid(row=5, column=0, sticky="w", pady=(4, 0))
 
-        self.current_x_label = tk.Label(frame, text="X: -")
-        self.current_y_label = tk.Label(frame, text="Y: -")
+        self.current_x_label = tk.Label(frame, text="X: -", fg=self.theme["success"])
+        self.current_y_label = tk.Label(frame, text="Y: -", fg=self.theme["success"])
 
         tl = tk.LabelFrame(frame, text="Timelapse Settings", padx=8, pady=8)
         tl.grid(row=8, column=0, sticky="ew", pady=(10, 0))
@@ -1053,8 +1065,17 @@ class UIBuilderMixin:
         live_roi_bar.pack(fill="x", pady=(4, 0))
         tk.Button(live_roi_bar, textvariable=self.live_roi_button_var, command=self.toggle_live_roi_selection).pack(side="right")
         tk.Button(live_roi_bar, text="Clear ROI", command=self.clear_live_roi_selection).pack(side="right", padx=(0, 6))
-        tk.Label(live_roi_bar, textvariable=self.live_roi_status_var, fg="#9aa6b2", bg=self.theme["panel"],
-                 anchor="w").pack(side="left", fill="x", expand=True)
+        tk.Label(live_roi_bar, textvariable=self.live_roi_status_prefix_var, fg="#9aa6b2", bg=self.theme["panel"],
+                 anchor="w").pack(side="left")
+        live_roi_status_value = tk.Label(
+            live_roi_bar,
+            textvariable=self.live_roi_status_value_var,
+            fg="#9aa6b2",
+            bg=self.theme["panel"],
+            anchor="w",
+        )
+        live_roi_status_value.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        self.live_roi_status_value_labels.append(live_roi_status_value)
         live_profile_grid = tk.Frame(live_tab, bg=self.theme["panel"])
         live_profile_grid.pack(fill="both", expand=True)
         live_profile_grid.grid_rowconfigure(0, weight=1)
@@ -1244,7 +1265,7 @@ class UIBuilderMixin:
         if latest_hdr_path:
             self.last_export_path = latest_hdr_path
             try:
-                self.last_export_var.set(f"Last export: {os.path.basename(latest_hdr_path)}")
+                self.last_export_var.set(os.path.basename(latest_hdr_path))
             except Exception:
                 pass
         return latest_hdr_path

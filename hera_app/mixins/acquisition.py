@@ -70,6 +70,39 @@ class AcquisitionMixin:
     def _fail_run_progress(self, text="Progress: error"):
         self._set_run_progress(text, 0, mode="determinate")
 
+    def _saving_product_text(self, product=None):
+        product_labels = {
+            "raw": "raw",
+            "ref": "ref",
+            "nrm": "norm",
+            "normalized": "norm",
+        }
+        if product:
+            return f"Saving {product_labels.get(str(product).lower(), product)}..."
+        return "Saving..."
+
+    def _set_saving_product_progress(self, product=None, percent=None):
+        if percent is None:
+            self._start_busy_progress(self._saving_product_text(product))
+        else:
+            self._set_run_progress(
+                f"{self._saving_product_text(product)} {percent}%",
+                percent,
+                mode="determinate",
+            )
+
+    def _helper_progress_text(self, event, percent):
+        phase = event.get("phase", "")
+        product = event.get("product")
+        if phase == "direct_saving":
+            return f"{self._saving_product_text(product)} {percent}%"
+        labels = {
+            "acquiring": "Acquiring",
+            "computing": "Computing",
+            "writing_cache": "Caching",
+        }
+        return f"{labels.get(phase, 'Working')}... {percent}%"
+
     def _acquisition_busy_reason(self, include_sdk=True, include_parameter_apply=True):
         busy_states = {
             self.STATE_LABELS["WaitingForTrigger"],
@@ -257,7 +290,7 @@ class AcquisitionMixin:
                 roi_h,
                 update_live=True,
                 selected=True,
-                status=f"ROI: active w={roi_w}, h={roi_h}",
+                status=f"Active ROI: w={roi_w}, h={roi_h}",
             )
         except Exception:
             pass
@@ -531,7 +564,7 @@ class AcquisitionMixin:
                             h,
                             update_live=True,
                             selected=True,
-                            status=f"ROI: active w={w}, h={h}",
+                            status=f"Active ROI: w={w}, h={h}",
                         ),
                     )
                 except Exception:
@@ -787,11 +820,12 @@ class AcquisitionMixin:
     def _start_helper_acquisition(self, request):
         self.helper_acquisition_process = None
         self.helper_acquisition_request_id = request.get("request_id")
+        self.helper_acquisition_abort_expected = False
         self.hera_service_acquisition_inflight = True
         self._start_busy_progress(
-            "Acquiring flatfield in helper service..."
+            "Acquiring flatfield..."
             if request.get("role") == "flatfield"
-            else "Acquiring in helper service..."
+            else "Acquiring..."
         )
         self.log(
             "Starting Hera helper service for "
@@ -835,13 +869,16 @@ class AcquisitionMixin:
                 raise RuntimeError("Helper service finished without returning acquisition data.")
             self._finish_helper_acquisition_result(result, request, time.perf_counter() - start_time)
         except Exception as exc:
-            if self.last_acquisition_error == "Helper service acquisition was aborted.":
+            if (
+                self.last_acquisition_error == "Helper service acquisition was aborted."
+                or getattr(self, "helper_acquisition_abort_expected", False)
+            ):
                 self._log_async("Helper service acquisition stopped after Abort.")
                 return
             self.last_acquisition_error = str(exc)
             self.acquisition_success = False
             self._log_async(f"Helper service acquisition failed: {exc}")
-            self._fail_run_progress("Progress: helper acquisition failed")
+            self._fail_run_progress("Progress: acquisition failed")
             self._safe_after(0, lambda: self.update_state("Error"))
             self.acquisition_done_event.set()
         finally:
@@ -852,6 +889,7 @@ class AcquisitionMixin:
                 self._log_async("Main Hera reconnect deferred until the timelapse finishes.")
             else:
                 self._schedule_helper_reconnect()
+            self.helper_acquisition_abort_expected = False
 
     def _handle_helper_service_acquisition_event(self, event):
         event_name = event.get("event")
@@ -860,13 +898,7 @@ class AcquisitionMixin:
         elif event_name == "progress":
             phase = event.get("phase", "helper")
             percent = max(0, min(100, int(event.get("percent", 0))))
-            labels = {
-                "acquiring": "Helper acquiring",
-                "computing": "Helper computing hypercube",
-                "writing_cache": "Helper writing cache",
-                "direct_saving": "Helper direct saving",
-            }
-            self._set_run_progress(f"{labels.get(phase, 'Helper')}: {percent}%", percent, mode="determinate")
+            self._set_run_progress(self._helper_progress_text(event, percent), percent, mode="determinate")
 
     def _helper_acquisition_worker(self, request_path, request):
         process = None
@@ -937,12 +969,16 @@ class AcquisitionMixin:
                 raise RuntimeError("Helper process finished without returning acquisition data.")
             self._finish_helper_acquisition_result(result, request, time.perf_counter() - start_time)
         except Exception as exc:
+            if getattr(self, "helper_acquisition_abort_expected", False):
+                self._log_async("Helper acquisition process stopped after Abort.")
+                self.acquisition_done_event.set()
+                return
             self.last_acquisition_error = str(exc)
             self.acquisition_success = False
             self._log_async(f"Helper acquisition failed: {exc}")
             if error_traceback:
                 self._log_async(error_traceback, detail=True)
-            self._fail_run_progress("Progress: helper acquisition failed")
+            self._fail_run_progress("Progress: acquisition failed")
             self._safe_after(0, lambda: self.update_state("Error"))
             self.acquisition_done_event.set()
         finally:
@@ -952,6 +988,7 @@ class AcquisitionMixin:
                 self._log_async("Main Hera reconnect deferred until the timelapse finishes.")
             else:
                 self._schedule_helper_reconnect()
+            self.helper_acquisition_abort_expected = False
 
     def _handle_helper_output_line(self, line):
         text = (line or "").strip()
@@ -968,13 +1005,7 @@ class AcquisitionMixin:
         elif event_name == "progress":
             phase = event.get("phase", "helper")
             percent = max(0, min(100, int(event.get("percent", 0))))
-            labels = {
-                "acquiring": "Helper acquiring",
-                "computing": "Helper computing hypercube",
-                "writing_cache": "Helper writing cache",
-                "direct_saving": "Helper direct saving",
-            }
-            self._set_run_progress(f"{labels.get(phase, 'Helper')}: {percent}%", percent, mode="determinate")
+            self._set_run_progress(self._helper_progress_text(event, percent), percent, mode="determinate")
         return event
 
     def _owned_data_from_helper_result(self, result, role):
@@ -1021,7 +1052,7 @@ class AcquisitionMixin:
             )
             self.last_export_path = preferred_path
             if preferred_path:
-                self._set_var_async(self.last_export_var, f"Last export: {os.path.basename(preferred_path)}")
+                self._set_var_async(self.last_export_var, os.path.basename(preferred_path))
             self._set_var_async(
                 self.hypercube_summary_var,
                 f"Direct-saved cube: {display_width} x {display_height}, bands={cube_bands}, type={cube_type}"
@@ -1145,7 +1176,7 @@ class AcquisitionMixin:
 
         if auto_save:
             self._safe_after(0, lambda: self.update_state("Saving"))
-            self._start_busy_progress("Saving helper acquisition data...")
+            self._start_busy_progress("Saving acquisition data...")
             output_dir = self.param_vars["output_path"].get()
             os.makedirs(output_dir, exist_ok=True)
             cube_hdr_text = self.pending_save_context["cube_hdr_text"]
@@ -1169,7 +1200,7 @@ class AcquisitionMixin:
                 )
             self.last_export_path = hdr_path
             self.pending_save_context = None
-            self._set_var_async(self.last_export_var, f"Last export: {os.path.basename(hdr_path)}")
+            self._set_var_async(self.last_export_var, os.path.basename(hdr_path))
             self._log_async(
                 ("Saved flatfield folder: " if role == "flatfield" else "Saved measurement folder: ")
                 + f"{measurement_dir} ({', '.join(sorted(saved_paths))})"
@@ -1551,6 +1582,7 @@ class AcquisitionMixin:
         saved_paths = {}
 
         if export_raw:
+            self._set_saving_product_progress("raw")
             raw_path = f"{output_base_path}_raw"
             raw_hdr_path = self._export_hypercube_envi_with_roi(
                 hypercube_handle,
@@ -1566,6 +1598,7 @@ class AcquisitionMixin:
         flatfield_matches = flatfield_export_info is not None
         if export_ref:
             if flatfield_matches:
+                self._set_saving_product_progress("ref")
                 ref_path = f"{output_base_path}_ref"
                 ref_hdr_path = self._export_hypercube_envi_with_roi(
                     self.flatfield_hypercube_handle,
@@ -1584,6 +1617,7 @@ class AcquisitionMixin:
 
         if export_nrm:
             if flatfield_matches:
+                self._set_saving_product_progress("nrm")
                 normalized_path = f"{output_base_path}_nrm"
                 normalized_description = f"{description}\nNormalized measurement (_nrm): native sample divided by flatfield reference"
                 nrm_hdr_path = self._export_normalized_envi_from_cubes(
@@ -1613,6 +1647,7 @@ class AcquisitionMixin:
     def _export_flatfield_reference_set(self, hypercube_handle, export_tag, output_dir, description, info):
         output_base_path, measurement_dir = self._make_measurement_base_path(output_dir, export_tag)
         ref_path = f"{output_base_path}_ref"
+        self._set_saving_product_progress("ref")
         ref_hdr_path = self._export_hypercube_envi_with_roi(
             hypercube_handle,
             ref_path,
@@ -1702,7 +1737,7 @@ class AcquisitionMixin:
                         sample_info,
                     )
                 self.last_export_path = hdr_path
-                self._set_var_async(self.last_export_var, f"Last export: {os.path.basename(hdr_path)}")
+                self._set_var_async(self.last_export_var, os.path.basename(hdr_path))
                 self._log_async(
                     ("Saved flatfield folder: " if role == "flatfield" else "Saved measurement folder: ")
                     +
@@ -1723,11 +1758,12 @@ class AcquisitionMixin:
         if getattr(self, "hera_service_acquisition_inflight", False):
             client = getattr(self, "hera_service_client", None)
             try:
+                self.helper_acquisition_abort_expected = True
                 if client:
                     client.kill()
                     self.hera_service_client = None
                 self.log("Helper service acquisition was killed by Abort.")
-                self._fail_run_progress("Progress: helper acquisition aborted")
+                self._fail_run_progress("Progress: acquisition aborted")
                 self.hera_service_acquisition_inflight = False
                 self.helper_acquisition_request_id = None
                 self._set_acquisition_inflight(False)
@@ -1738,15 +1774,16 @@ class AcquisitionMixin:
                 self._schedule_helper_reconnect()
             except Exception as exc:
                 self.log(f"Failed to abort helper service acquisition: {exc}")
-                self._fail_run_progress("Progress: helper abort failed")
+                self._fail_run_progress("Progress: abort failed")
                 self.update_state("Error")
             return
         helper_process = getattr(self, "helper_acquisition_process", None)
         if helper_process and helper_process.poll() is None:
             try:
+                self.helper_acquisition_abort_expected = True
                 helper_process.kill()
                 self.log("Helper acquisition process was killed by Abort.")
-                self._fail_run_progress("Progress: helper acquisition aborted")
+                self._fail_run_progress("Progress: acquisition aborted")
                 self._set_acquisition_inflight(False)
                 self.update_state("Ready")
                 self.acquisition_success = False
@@ -1755,7 +1792,7 @@ class AcquisitionMixin:
                 self._schedule_helper_reconnect()
             except Exception as exc:
                 self.log(f"Failed to abort helper acquisition: {exc}")
-                self._fail_run_progress("Progress: helper abort failed")
+                self._fail_run_progress("Progress: abort failed")
                 self.update_state("Error")
             return
         if not self.controller or not self.controller.connected:
@@ -2313,7 +2350,7 @@ class AcquisitionMixin:
                     self.current_hypercube_info,
                 )
             self.last_export_path = hdr_path
-            self._set_var_async(self.last_export_var, f"Last export: {os.path.basename(hdr_path)}")
+            self._set_var_async(self.last_export_var, os.path.basename(hdr_path))
             self._log_async(
                 "Saved measurement folder: "
                 f"{measurement_dir} ({', '.join(sorted(saved_paths))})"

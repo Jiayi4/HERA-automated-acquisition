@@ -924,7 +924,7 @@ class HyperspectralViewerMixin:
                 detail_text = "Run one acquisition to populate the in-app band viewer"
         canvas.create_text(width / 2, height / 2 - 20, text="Hyperspectral View", fill=self.theme["text"], font=("Segoe UI Semibold", 14))
         canvas.create_text(width / 2, height / 2 + 2, text=detail_text, fill=self.theme["muted"], font=("Segoe UI", 10))
-        export_text = self.last_export_var.get() if hasattr(self, "last_export_var") else "Last export: -"
+        export_text = self.last_export_var.get() if hasattr(self, "last_export_var") else "-"
         canvas.create_text(width / 2, height / 2 + 24, text=self.hypercube_summary_var.get(), fill=self.theme["text"], font=("Segoe UI", 10))
         canvas.create_text(width / 2, height / 2 + 46, text=export_text, fill=self.theme["muted"], font=("Segoe UI", 10))
         self._draw_hyper_spectrum_panel()

@@ -210,19 +210,60 @@ class TimelapseMixin:
         self._abort_current_timelapse_acquisition()
         self.log("Timelapse stop requested.")
 
-    def _abort_current_timelapse_acquisition(self):
+    def _abort_current_timelapse_acquisition(self, reason="Timelapse stopped by user."):
+        aborted = False
+        if getattr(self, "hera_service_acquisition_inflight", False):
+            client = getattr(self, "hera_service_client", None)
+            try:
+                self.helper_acquisition_abort_expected = True
+                if client:
+                    client.kill()
+                    self.hera_service_client = None
+                self.hera_service_acquisition_inflight = False
+                self.helper_acquisition_request_id = None
+                self.acquisition_success = False
+                self.last_acquisition_error = reason
+                self.acquisition_done_event.set()
+                self._set_acquisition_inflight(False)
+                self._fail_run_progress("Progress: acquisition aborted")
+                self._schedule_helper_reconnect()
+                self._log_async("Helper service acquisition was killed for timelapse stop/timeout.")
+                return True
+            except Exception as exc:
+                self._log_async(f"Could not kill helper service acquisition during timelapse stop/timeout: {exc}")
+
+        helper_process = getattr(self, "helper_acquisition_process", None)
+        if helper_process and helper_process.poll() is None:
+            try:
+                self.helper_acquisition_abort_expected = True
+                helper_process.kill()
+                self.helper_acquisition_process = None
+                self.acquisition_success = False
+                self.last_acquisition_error = reason
+                self.acquisition_done_event.set()
+                self._set_acquisition_inflight(False)
+                self._fail_run_progress("Progress: acquisition aborted")
+                self._schedule_helper_reconnect()
+                self._log_async("Helper acquisition process was killed for timelapse stop/timeout.")
+                return True
+            except Exception as exc:
+                self._log_async(f"Could not kill helper acquisition process during timelapse stop/timeout: {exc}")
+
         if not self.controller or not self.controller.connected:
-            return
+            return aborted
         try:
             if not self.controller.is_acquiring():
-                return
+                return aborted
             self.controller.abort_hyperspectral_acquisition()
             self.acquisition_success = False
-            self.last_acquisition_error = "Timelapse stopped by user."
+            self.last_acquisition_error = reason
             self.acquisition_done_event.set()
-            self.log("Current Hera acquisition aborted for timelapse stop.")
+            self._set_acquisition_inflight(False)
+            self._log_async("Current Hera acquisition aborted for timelapse stop/timeout.")
+            aborted = True
         except Exception as exc:
-            self.log(f"Could not abort current Hera acquisition during timelapse stop: {exc}")
+            self._log_async(f"Could not abort current Hera acquisition during timelapse stop/timeout: {exc}")
+        return aborted
 
     def _timelapse_worker(self, single_cycle=False, positions_override=None, run_id=None):
         if run_id is None:
@@ -429,7 +470,23 @@ class TimelapseMixin:
         while self.timelapse_pause_event.is_set() and not self.timelapse_stop_event.is_set():
             time.sleep(0.1)
 
-    def _await_timelapse_acquisition_completion(self, timeout_sec=600):
+    def _timelapse_acquisition_timeout_sec(self, requested_timeout=None):
+        candidates = []
+        for value in (
+            requested_timeout,
+            getattr(self, "helper_process_timeout_sec", None),
+            getattr(self, "helper_acquisition_timeout_sec", None),
+            600,
+        ):
+            try:
+                if value is not None:
+                    candidates.append(float(value))
+            except Exception:
+                pass
+        return max(candidates or [600.0]) + 60.0
+
+    def _await_timelapse_acquisition_completion(self, timeout_sec=None):
+        timeout_sec = self._timelapse_acquisition_timeout_sec(timeout_sec)
         deadline = time.time() + timeout_sec
         abort_requested = False
         while time.time() < deadline:
@@ -439,7 +496,13 @@ class TimelapseMixin:
                 abort_requested = True
                 self._abort_current_timelapse_acquisition()
         else:
-            raise RuntimeError("Timed out waiting for Hera acquisition to complete.")
+            reason = f"Timed out waiting for Hera acquisition to complete after {timeout_sec:.0f} s."
+            self._log_async(reason)
+            self._abort_current_timelapse_acquisition(reason=reason)
+            self.acquisition_success = False
+            self.last_acquisition_error = reason
+            self.acquisition_done_event.set()
+            raise RuntimeError(reason)
 
         if self.timelapse_stop_event.is_set() and not self.acquisition_success:
             raise TimelapseStopped("Timelapse stopped by user.")

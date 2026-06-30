@@ -253,7 +253,7 @@ class DeviceMixin:
                     self.hdr_enabled_var.set(False)
                     self.license_ok_seen = False
                 if clear_cached_data:
-                    self.last_export_var.set("Last export: -")
+                    self.last_export_var.set("-")
                 self._set_live_view_status("Live view: disconnected")
                 if update_state_after_release:
                     self.update_state("Idle" if release_ok else "Error")
@@ -336,7 +336,7 @@ class DeviceMixin:
             self.hdr_status_var.set(self.hdr_status_text(None))
             self.hdr_enabled_var.set(False)
             self.license_ok_seen = False
-            self.last_export_var.set("Last export: -")
+            self.last_export_var.set("-")
             self.update_state("Idle")
             self.log("Disconnected from Hera device.")
         except Exception as exc:

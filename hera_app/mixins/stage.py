@@ -40,12 +40,21 @@ class StageMixin:
     def start_stage_polling(self):
         self._poll_stage_position()
 
+    def _stage_poll_interval_ms(self):
+        try:
+            if self.timelapse_thread and self.timelapse_thread.is_alive():
+                return 1000
+        except Exception:
+            pass
+        return 250
+
     def _poll_stage_position(self):
         if self.is_closing:
             self.stage_poll_job = None
             return
         self._update_time_remaining()
-        if self.tango and self.tango.connected:
+        if self.tango and self.tango.connected and not getattr(self, "stage_poll_inflight", False):
+            self.stage_poll_inflight = True
             def _worker():
                 try:
                     with self.stage_lock:
@@ -61,10 +70,13 @@ class StageMixin:
                     self._safe_after(0, _apply)
                 except Exception:
                     pass
+                finally:
+                    self.stage_poll_inflight = False
             threading.Thread(target=_worker, daemon=True).start()
-        else:
+        elif not (self.tango and self.tango.connected):
             self.latest_stage_xy = None
-        self.stage_poll_job = self._safe_after(250, self._poll_stage_position)
+            self.stage_poll_inflight = False
+        self.stage_poll_job = self._safe_after(self._stage_poll_interval_ms(), self._poll_stage_position)
 
     def _format_saved_z(self, z):
         if z is None:

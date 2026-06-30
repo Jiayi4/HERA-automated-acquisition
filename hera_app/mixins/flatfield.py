@@ -374,7 +374,7 @@ class FlatfieldMixin:
                     self.flatfield_info,
                 )
                 self.last_export_path = hdr_path
-                self._set_var_async(self.last_export_var, f"Last export: {os.path.basename(hdr_path)}")
+                self._set_var_async(self.last_export_var, os.path.basename(hdr_path))
                 self._log_async(
                     "Saved flatfield folder: "
                     f"{measurement_dir} ({', '.join(sorted(saved_paths))})"
