@@ -724,7 +724,7 @@ class UIBuilderMixin:
         tk.Entry(sites_row, textvariable=self.timelapse_sites_var, width=12).pack(side="left", fill="x", expand=True)
         tk.Button(sites_row, text="All", command=self.select_all_timelapse_sites, width=5).pack(side="left", padx=(4, 0))
         tk.Button(acquisition, text="Run One Loop", command=self.run_one_cycle).pack(fill="x", pady=2)
-        tk.Button(acquisition, text="Run Timelapse", command=self.start_timelapse, bg="#ff8b3d", fg="#111111", activebackground="#ffb37a").pack(fill="x", pady=2)
+        tk.Button(acquisition, text="Run Timelapse", command=self.start_timelapse).pack(fill="x", pady=2)
         self.pause_button = tk.Button(acquisition, text="Pause", command=self.pause_or_resume_timelapse)
         self.pause_button.pack(fill="x", pady=2)
         tk.Button(acquisition, text="Stop Timelapse", command=self.stop_timelapse).pack(fill="x", pady=2)
