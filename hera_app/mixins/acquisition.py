@@ -65,10 +65,48 @@ class AcquisitionMixin:
         self._set_run_progress(text, mode="indeterminate")
 
     def _finish_run_progress(self, text="Progress: complete"):
+        self._stop_single_acquisition_timer()
         self._set_run_progress(text, 100, mode="determinate")
 
     def _fail_run_progress(self, text="Progress: error"):
+        self._stop_single_acquisition_timer()
         self._set_run_progress(text, 0, mode="determinate")
+
+    def _start_single_acquisition_timer(self):
+        if self._timelapse_thread_active():
+            self.single_acquisition_start_perf_time = None
+            return
+        self.single_acquisition_timer_token += 1
+        token = self.single_acquisition_timer_token
+        self.single_acquisition_start_perf_time = time.perf_counter()
+        self.total_run_time_var.set("00:00")
+        self._safe_after(1000, lambda token=token: self._update_single_acquisition_timer(token))
+
+    def _update_single_acquisition_timer(self, token):
+        if token != getattr(self, "single_acquisition_timer_token", None):
+            return
+        if getattr(self, "is_closing", False) or self._timelapse_thread_active():
+            return
+        start_time = getattr(self, "single_acquisition_start_perf_time", None)
+        if start_time is None:
+            return
+        elapsed = int(max(0, time.perf_counter() - start_time))
+        self.total_run_time_var.set(self._format_countdown_seconds(elapsed))
+        self.single_acquisition_timer_job = self._safe_after(
+            1000,
+            lambda token=token: self._update_single_acquisition_timer(token),
+        )
+
+    def _stop_single_acquisition_timer(self):
+        start_time = getattr(self, "single_acquisition_start_perf_time", None)
+        if start_time is None:
+            return
+        elapsed = int(max(0, time.perf_counter() - start_time))
+        self.single_acquisition_start_perf_time = None
+        self.single_acquisition_timer_token += 1
+        self.single_acquisition_timer_job = None
+        if not self._timelapse_thread_active():
+            self.total_run_time_var.set(self._format_countdown_seconds(elapsed))
 
     def _saving_product_text(self, product=None):
         product_labels = {
@@ -1254,6 +1292,7 @@ class AcquisitionMixin:
             parameter_lock_acquired = True
             return self._arm_and_start_acquisition_locked(export_tag, acquisition_role, forced_roi, auto_save, use_camera_roi)
         except Exception:
+            self._stop_single_acquisition_timer()
             self._set_acquisition_inflight(False)
             raise
         finally:
@@ -1278,6 +1317,7 @@ class AcquisitionMixin:
         if self.processing_lock.locked():
             raise RuntimeError("The previous acquisition is still being processed.")
 
+        self._start_single_acquisition_timer()
         self._set_acquisition_inflight(True)
         arm_start_time = time.perf_counter()
         live_was_running = self.controller.is_live_capturing() if controller_connected else False

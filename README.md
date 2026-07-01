@@ -85,7 +85,7 @@ C:\BIOS DATA\jiayi\APP
 7. Add or update sites in `Saved Sites`. Each site stores the current XY position and active ROI.
 8. Choose export folder/name/stamp and select exactly which products to save: `_raw`, `_ref`, and/or `_nrm`.
 9. Use `Start Single Acquisition`, `Run One Loop`, or `Run Timelapse`.
-10. Watch `Run Status` for Status, Site, Cycle, Next loop, Total run time, and progress.
+10. Watch `Run Status` for Status, Site, Cycle, Next loop, Total run time, and progress. `Total run time` tracks either a running timelapse or the current single acquisition.
 
 ## Camera And Spectral Settings
 
@@ -132,7 +132,7 @@ The timelapse `Sites` field accepts `all`, comma-separated site numbers, and ran
 
 `Run One Loop` runs the selected sites once.
 
-`Run Timelapse` repeats selected-site loops. The `Interval (min)` value is the wait time from the end of one loop to the start of the next loop. The app also waits the configured `Dwell (s)` after moving to a site before starting acquisition.
+`Run Timelapse` repeats selected-site loops. The `Interval (min)` value is the wait time from the end of one loop to the start of the next loop; `0` starts the next loop immediately. The app also waits the configured `Dwell (s)` after moving to a site before starting acquisition.
 
 `Pause` pauses between acquisition steps and can be pressed again to resume. `Stop Timelapse` requests the timelapse worker to stop after the current safe point. `Abort Acquisition` is for the active HERA acquisition.
 

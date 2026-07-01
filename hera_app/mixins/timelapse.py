@@ -150,8 +150,8 @@ class TimelapseMixin:
             return
 
         interval_min = float(self.interval_var.get())
-        if interval_min <= 0:
-            self.log("Interval must be greater than zero.")
+        if interval_min < 0:
+            self.log("Interval must be zero or greater.")
             return
         if not self._validate_auto_save_export_options():
             return
@@ -302,21 +302,26 @@ class TimelapseMixin:
                     self._log_async("Reached requested stop time.")
                     break
 
-                next_cycle_time = datetime.now() + timedelta(minutes=interval_min)
-                self.next_loop_deadline = next_cycle_time
-                self._log_async(
-                    f"Cycle {cycle} complete. Waiting {interval_min:.2f} minutes from loop completion before next cycle."
-                )
-                while datetime.now() < next_cycle_time:
-                    if self.timelapse_stop_event.is_set():
-                        break
-                    self._wait_while_paused()
-                    if self.timelapse_stop_at and datetime.now() >= self.timelapse_stop_at:
-                        self.timelapse_stop_event.set()
-                        break
-                    time.sleep(0.25)
-                self.next_loop_deadline = None
-                self._set_var_async(self.next_loop_remaining_var, "-")
+                if interval_min <= 0:
+                    self.next_loop_deadline = None
+                    self._set_var_async(self.next_loop_remaining_var, "00:00")
+                    self._log_async(f"Cycle {cycle} complete. Interval is 0; starting next cycle immediately.")
+                else:
+                    next_cycle_time = datetime.now() + timedelta(minutes=interval_min)
+                    self.next_loop_deadline = next_cycle_time
+                    self._log_async(
+                        f"Cycle {cycle} complete. Waiting {interval_min:.2f} minutes from loop completion before next cycle."
+                    )
+                    while datetime.now() < next_cycle_time:
+                        if self.timelapse_stop_event.is_set():
+                            break
+                        self._wait_while_paused()
+                        if self.timelapse_stop_at and datetime.now() >= self.timelapse_stop_at:
+                            self.timelapse_stop_event.set()
+                            break
+                        time.sleep(0.25)
+                    self.next_loop_deadline = None
+                    self._set_var_async(self.next_loop_remaining_var, "-")
         except TimelapseStopped as exc:
             self._log_async(str(exc) or "Timelapse stopped.")
         except Exception as exc:

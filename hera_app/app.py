@@ -269,6 +269,9 @@ class HeraTriggerApp(
         self.acquisition_requested_hdr = False
         self.acquisition_pre_start_hdr = None
         self.acquisition_start_perf_time = None
+        self.single_acquisition_start_perf_time = None
+        self.single_acquisition_timer_token = 0
+        self.single_acquisition_timer_job = None
         self.last_acquisition_progress_time = None
         self.last_acquisition_heartbeat_log_sec = 0
         self.helper_acquisition_enabled = True
