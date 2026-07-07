@@ -1,2 +1,2 @@
-# Standard-library-only app.
 # tkinter, ctypes, threading, time, and os are included with standard Python on Windows.
+pymmcore>=12.5.0

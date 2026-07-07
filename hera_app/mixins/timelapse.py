@@ -547,18 +547,18 @@ class TimelapseMixin:
         return f"{minutes:02d}:{sec:02d}"
 
     def _timelapse_site_z_target(self, position):
-        if not getattr(self, "z_motion_enabled", False):
-            return None, "Z disabled"
+        if not getattr(self, "timelapse_z_motion_enabled", False):
+            return None, "Z auto-move disabled"
         try:
             target_z = float(position.z)
         except (TypeError, ValueError):
             return None, "no Z"
         if math.isnan(target_z):
             return None, "no Z"
-        if self.nis_z is None or self.nis_z_last_value is None:
-            return None, "Z skipped: bridge not ready"
-        if str(self.nis_z_last_status).lower() != "ok":
-            return None, f"Z skipped: {self.nis_z_last_status}"
+        if not getattr(self, "micro_z_connected", False) or getattr(self, "z_last_value", None) is None:
+            return None, "Z skipped: Micro-Manager Z not connected"
+        if str(getattr(self, "z_last_status", "")).lower() != "ok":
+            return None, f"Z skipped: {self.z_last_status}"
         return target_z, "pending"
 
     def run_stage_site_acquisition(self, position, cycle_index=None):
@@ -580,14 +580,14 @@ class TimelapseMixin:
         if self.timelapse_stop_event.is_set():
             raise TimelapseStopped("Timelapse stopped before acquisition.")
 
-        # Z motion is disabled for now; only XY is moved before Hera acquisition.
+        # Z auto-move remains disabled until manual Nikon Ti Z control is fully validated in the app.
         confirmed_z = None
         z_status = "no Z"
         target_z, z_status = self._timelapse_site_z_target(position)
         if target_z is not None:
-            self._log_async(f"NIS Z: targeting {target_z:.3f} um for {position.name}...")
+            self._log_async(f"Micro-Manager Z targeting {target_z:.3f} um for {position.name}...")
             confirmed_z, z_status = self._move_z_to_position(target_z)
-        elif z_status not in ("no Z", "Z disabled"):
+        elif z_status not in ("no Z", "Z auto-move disabled"):
             self._log_async(f"{z_status} for {position.name}; starting Hera acquisition without Z move.")
 
         if self.timelapse_stop_event.is_set():

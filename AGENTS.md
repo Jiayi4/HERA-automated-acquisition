@@ -1,11 +1,11 @@
-# Agent Notes: HERA App And NIS Z Bridge
+# Agent Notes: HERA App And Micro-Manager Z
 
-This repo controls the HERA camera/stage app and the NIS-Elements Z-axis bridge. Work carefully, make small changes, and keep GitHub as the source of truth.
+This repo controls the HERA camera/stage app and optional Nikon Ti Z control through Micro-Manager. Work carefully, make small changes, and keep GitHub as the source of truth.
 
 ## Repo Rules
 
 - Preserve user changes. Do not reset or revert the repo unless the user explicitly asks.
-- Keep meaningful fixes committed/pushed to GitHub when the user asks to publish or when NIS-side files need deployment.
+- Keep meaningful fixes committed/pushed to GitHub when the user asks to publish.
 - `AppHeraTriggerPython0417.py` is only the launcher. Do not put app logic there.
 - The app should run from the tracked `hera-trigger-app\hera_app` package. Do not recreate or sync a parent-folder `hera_app` runtime mirror unless the user explicitly asks to restore that legacy setup.
 - After every code change, tell the user exactly how to verify it: concrete app actions, expected results, and logs/files to inspect. If hardware testing was not possible locally, say that clearly.
@@ -20,7 +20,8 @@ hera_app/
     controllers/
         hera.py                   Hera SDK / HeraAPI.dll wrapper
         tango.py                  Tango stage / Tango_DLL.dll wrapper
-        nis_z.py                  NIS Z shared-folder bridge client
+        micro_z.py                Micro-Manager MMCore Nikon Ti Z wrapper
+        nis_z.py                  legacy optional NIS Z shared-folder bridge client
     mixins/
         ui_builder.py             UI construction and widget behavior
         device.py                 Hera/Tango connection, license, preflight, HDR
@@ -32,7 +33,8 @@ hera_app/
         hyperspectral_viewer.py   band display and spectrum panel
         export.py                 ENVI export, ROI crop, HyperLAB header patching
         stage.py                  stage motion and saved positions
-        nis_z_mixin.py            NIS Z polling and controls
+        micro_z_mixin.py          Micro-Manager Z polling and controls
+        nis_z_mixin.py            legacy optional NIS Z polling and controls
         theme.py                  light/dark theme
         utils.py                  safe Tk scheduling and async UI helpers
 ```
@@ -41,7 +43,7 @@ Open the relevant mixin/controller directly before editing. Use search if a meth
 
 ## Core App Invariants
 
-- The active UI is a three-pane layout: left status/exposure/ROI/XYZ/saved positions/NIS Z, center spectral/live/hyperspectral views, right acquisition/timelapse/export controls. Add controls to the correct pane and avoid duplicate ROI or saved-position controls.
+- The active UI is a three-pane layout: left status/parameters/ROI, center spectral/live/hyperspectral views, and right acquisition/timelapse/export controls; the Stage tab contains XY, optional Z, and saved-site controls. Add controls to the correct pane and avoid duplicate ROI or saved-position controls.
 - UI controls should be immediate where safe: buttons/checkbuttons focus and invoke on Enter, entries commit on Enter or changed FocusOut, and connected camera option variables auto-apply with debounce. Do not add generic Apply buttons for camera parameters or ROI fields.
 - Keep camera parameter apply off the Tk main thread. Stop live capture in a worker when needed, apply settings, then schedule UI updates/live restart back on Tk.
 - Background logging is always on. Keep the Tk/Python/thread exception hooks and the `Open Log` button wired to `hera_last_issues.log`; the full log is `hera_background_status.log`.
@@ -55,7 +57,8 @@ Open the relevant mixin/controller directly before editing. Use search if a meth
 - Saved positions include per-site ROI in `SavedPosition.roi`. Adding/updating/saving a site captures the active ROI; selecting a site restores it.
 - Manual site runs, `Run First 2 Sites`, and timelapse use the saved ROI for each site, falling back to the timelapse-start ROI only when the site has no saved ROI.
 - The saved positions list starts empty. Do not seed a default `Start` or `0,0` position.
-- If NIS Z is unavailable, save `dummy_z_position` (`0.000`) so XY sites remain usable.
+- If Micro-Manager Z is unavailable, save `dummy_z_position` (`0.000`) so XY sites remain usable.
+- Timelapse auto Z movement is disabled by default. Manual `Go To Z` is available after `Connect Z`; do not enable automatic Z motion unless the user explicitly asks.
 
 ## Hyperspectral, Export, And HyperLAB
 
@@ -84,15 +87,15 @@ Open the relevant mixin/controller directly before editing. Use search if a meth
 - `Live View HDR` is a live-preview aid, not a guaranteed hyperspectral HDR acquisition mode. Record SDK-reported raw/cube HDR flags in logs/export descriptions instead of assuming HDR cubes were saved.
 - Keep the live cursor readout compact and stable in the left Status panel.
 
-## Local-Only NIS And Design Files
+## Local-Only Hardware And Design Files
 
-NIS Z bridge files and UI design preview HTML files are private/local working materials and must not be tracked or pushed to GitHub. Keep local copies in ignored folders such as `NIS-Z-Bridge/` and `design_previews/`, or under the workspace `archive/`.
+NIS Z bridge files, Micro-Manager installers/config backups, and UI design preview HTML files are private/local working materials and must not be tracked or pushed to GitHub. Keep local copies in ignored folders such as `NIS-Z-Bridge/`, `local/`, and `design_previews/`, or under the workspace `archive/`.
 
 ## Validation
 
 - For Python-only changes, at minimum run `python -m py_compile` on touched Python files.
 - For UI/hardware behavior, give the user a manual validation recipe with exact buttons/actions and expected state/log/output.
-- For NIS bridge changes, include NIS PC startup/update steps when relevant.
+- For Micro-Manager Z changes, include setup/validation steps: close Micro-Manager GUI, click `Connect Z`, read Z, jog `Z+`/`Z-`, and verify saved-site Z values.
 
 ## Commit Template
 

@@ -433,11 +433,27 @@ class UIBuilderMixin:
         tk.Button(stage_status_row, text="Reconnect", command=self.reconnect_stage).grid(row=0, column=2, sticky="e")
         live_xy = tk.Frame(xyz)
         live_xy.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        tk.Label(live_xy, text="Live XY:", fg=self.theme["text"], width=8, anchor="w").pack(side="left")
-        self.current_x_label = tk.Label(live_xy, text="X: -", fg=self.theme["success"])
-        self.current_y_label = tk.Label(live_xy, text="Y: -", fg=self.theme["success"])
+        live_xy.grid_columnconfigure(1, weight=1)
+        tk.Label(live_xy, text="Live XY:", fg=self.theme["text"], width=8, anchor="w").grid(row=0, column=0, sticky="w")
+        xy_values = tk.Frame(live_xy)
+        xy_values.grid(row=0, column=1, sticky="w")
+        self.current_x_label = tk.Label(xy_values, text="X: -", fg=self.theme["success"])
+        self.current_y_label = tk.Label(xy_values, text="Y: -", fg=self.theme["success"])
         self.current_x_label.pack(side="left", padx=(0, 4))
         self.current_y_label.pack(side="left")
+        live_z = tk.Frame(xyz)
+        live_z.grid(row=2, column=0, sticky="ew", pady=(3, 0))
+        live_z.grid_columnconfigure(1, weight=1)
+        tk.Label(live_z, text="Live Z:", fg=self.theme["text"], width=8, anchor="w").grid(row=0, column=0, sticky="w")
+        self.current_z_label = tk.Label(live_z, textvariable=self.micro_z_current_z_var, fg=self.theme["success"])
+        self.current_z_label.grid(row=0, column=1, sticky="w")
+        self.micro_z_toggle_button = tk.Button(
+            live_z,
+            textvariable=self.micro_z_toggle_text_var,
+            command=self.toggle_micro_z_connection,
+            width=9,
+        )
+        self.micro_z_toggle_button.grid(row=0, column=2, sticky="e", padx=(4, 0))
 
         xy_control = tk.LabelFrame(stage_tab, text="XY Control", padx=5, pady=4)
         xy_control.pack(fill="x", pady=(0, 6))
@@ -471,6 +487,8 @@ class UIBuilderMixin:
         self.stage_xy_stop_button._hera_control_bar_button = True
         self.stage_xy_stop_button.pack(side="left", padx=(1, 0))
         self.stage_xy_motion_buttons.append(go_xy_button)
+
+        self._build_micro_z_ui(stage_tab)
 
         saved = tk.LabelFrame(stage_tab, text="Saved Sites", padx=6, pady=5)
         saved.pack(fill="x", pady=(0, 6))
@@ -507,9 +525,6 @@ class UIBuilderMixin:
             ("Rename Selected Site", self.rename_selected_position),
         ):
             tk.Button(position_panel, text=text, command=command).pack(fill="x", pady=1)
-
-        if getattr(self, "z_motion_enabled", False):
-            self._build_nis_z_ui(stage_tab)
 
     def _build_center_workspace(self, parent):
         spectral = tk.LabelFrame(parent, text="Control Bar", padx=8, pady=6)
@@ -892,10 +907,37 @@ class UIBuilderMixin:
                 button.config(state=state)
             except Exception:
                 pass
+        z_status_var = getattr(self, "micro_z_status_var", None)
+        z_status_text = str(z_status_var.get()).lower() if z_status_var is not None else ""
+        z_connection_busy = "connecting" in z_status_text or "disconnecting" in z_status_text
+        z_state = "disabled" if reason or z_connection_busy else "normal"
+        for button in getattr(self, "micro_z_motion_buttons", []):
+            try:
+                button.config(state=z_state)
+            except Exception:
+                pass
         stop_button = getattr(self, "stage_xy_stop_button", None)
         if stop_button:
             try:
                 stop_button.config(state="normal" if getattr(self, "stage_motion_inflight", False) else "disabled")
+            except Exception:
+                pass
+        z_stop_button = getattr(self, "micro_z_stop_button", None)
+        if z_stop_button:
+            try:
+                z_stop_button.config(state="normal" if getattr(self, "micro_z_connected", False) else "disabled")
+            except Exception:
+                pass
+        z_toggle_button = getattr(self, "micro_z_toggle_button", None)
+        if z_toggle_button:
+            try:
+                if "connecting" in z_status_text:
+                    self.micro_z_toggle_text_var.set("Connecting")
+                elif "disconnecting" in z_status_text:
+                    self.micro_z_toggle_text_var.set("Disconnecting")
+                else:
+                    self.micro_z_toggle_text_var.set("Disconnect" if getattr(self, "micro_z_connected", False) else "Connect Z")
+                z_toggle_button.config(state="disabled" if reason or z_connection_busy else "normal")
             except Exception:
                 pass
 
@@ -1023,6 +1065,35 @@ class UIBuilderMixin:
         tk.Button(tl, text="All", command=self.select_all_timelapse_sites).grid(row=2, column=2, sticky="w", pady=(10, 0))
         tk.Label(tl, text="Next loop").grid(row=3, column=0, sticky="w", pady=(10, 0))
         tk.Label(tl, textvariable=self.next_loop_remaining_var).grid(row=3, column=1, sticky="w", padx=(6, 10), pady=(10, 0))
+
+    def _build_micro_z_ui(self, parent):
+        frame = tk.LabelFrame(parent, text="Z Control", padx=5, pady=4)
+        frame.pack(fill="x", pady=(0, 6))
+
+        target_row = tk.Frame(frame)
+        target_row.pack(fill="x", pady=(0, 4))
+        tk.Label(target_row, text="Target Z").pack(side="left", padx=(0, 3))
+        tk.Entry(target_row, textvariable=self.micro_z_target_var, width=8).pack(side="left", padx=(0, 4))
+        go_z_button = tk.Button(target_row, text="Go To Z", command=self._micro_z_move_abs_from_target, width=8)
+        go_z_button._hera_control_bar_button = True
+        go_z_button.pack(side="left", fill="x", expand=True)
+        self.micro_z_motion_buttons.append(go_z_button)
+
+        move_row = tk.Frame(frame)
+        move_row.pack(fill="x")
+        tk.Label(move_row, text="Step").pack(side="left", padx=(0, 2))
+        tk.Entry(move_row, textvariable=self.micro_z_step_var, width=4).pack(side="left", padx=(0, 3))
+        for text, command in (
+            ("Z-", lambda: self._micro_z_move_step(-1)),
+            ("Z+", lambda: self._micro_z_move_step(+1)),
+        ):
+            button = tk.Button(move_row, text=text, command=command, width=3)
+            button._hera_control_bar_button = True
+            button.pack(side="left", padx=(0, 1))
+            self.micro_z_motion_buttons.append(button)
+        self.micro_z_stop_button = tk.Button(move_row, text="Stop Z", command=self._micro_z_stop, width=7, state="disabled")
+        self.micro_z_stop_button._hera_control_bar_button = True
+        self.micro_z_stop_button.pack(side="left", padx=(1, 0))
 
     def _build_nis_z_ui(self, parent):
         frame = tk.LabelFrame(parent, text="NIS Z Bridge", padx=6, pady=5)

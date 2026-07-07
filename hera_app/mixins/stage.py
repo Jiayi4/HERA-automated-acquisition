@@ -89,28 +89,28 @@ class StageMixin:
         return f"{float(z):.3f}"
 
     def _current_cached_z(self):
-        if not getattr(self, "z_motion_enabled", False):
+        z = getattr(self, "z_last_value", None)
+        if z is None:
             return math.nan
-        return self.nis_z_last_value if self.nis_z_last_value is not None else math.nan
+        return z
 
     def _get_current_z_or_nan(self):
-        """Read NIS Z synchronously for position saving; return NaN if unavailable."""
-        if not getattr(self, "z_motion_enabled", False):
-            return math.nan
-        try:
-            with self.nis_z_request_lock:
-                z = self._get_nis_z_controller().get_z(timeout_sec=int(self.nis_z_timeout_var.get()))
-            self._set_nis_z_value(z)
-            return z
-        except Exception as exc:
-            self.log(f"Could not read NIS Z while saving position: {exc}")
-            return math.nan
+        """Read Nikon Ti Z synchronously for position saving; return NaN if unavailable."""
+        if hasattr(self, "_read_micro_z_for_save"):
+            return self._read_micro_z_for_save()
+        return math.nan
 
     def _z_disabled_log_text(self, name):
-        return f"Saved dummy Z={self.dummy_z_position:.3f} for {name} because Z control is disabled."
+        return f"Saved dummy Z={self.dummy_z_position:.3f} for {name} because Z control is not connected."
 
     def _get_position_save_z(self):
-        """Use cached NIS Z if available; otherwise use a dummy Z so XY saving still works."""
+        """Use Nikon Ti Z if available; otherwise use a dummy Z so XY sites remain usable."""
+        current_z = self._get_current_z_or_nan()
+        try:
+            if not math.isnan(float(current_z)):
+                return float(current_z), False
+        except Exception:
+            pass
         cached_z = self._current_cached_z()
         try:
             if not math.isnan(float(cached_z)):
@@ -206,6 +206,8 @@ class StageMixin:
             position = self.positions[self.selected_position_index]
             self._populate_selected_position_fields(position)
             self._apply_position_roi_to_ui(position)
+            if hasattr(self, "micro_z_target_var") and self._format_saved_z(position.z):
+                self.micro_z_target_var.set(self._format_saved_z(position.z))
             self.center_stage_summary_var.set(
                 f"Selected position: {position.name}  |  X={position.x:.3f}  "
                 f"Y={position.y:.3f}  Z={self._format_saved_z(position.z) or '-'}  "
@@ -221,12 +223,16 @@ class StageMixin:
         self.selected_x_var.set(f"{position.x:.3f}")
         self.selected_y_var.set(f"{position.y:.3f}")
         self.selected_z_var.set(self._format_saved_z(position.z))
+        if hasattr(self, "micro_z_target_var"):
+            self.micro_z_target_var.set(self._format_saved_z(position.z))
 
     def _clear_selected_position_fields(self):
         self.selected_name_var.set("")
         self.selected_x_var.set("")
         self.selected_y_var.set("")
         self.selected_z_var.set("")
+        if hasattr(self, "micro_z_target_var"):
+            self.micro_z_target_var.set("")
 
     def capture_current_stage_position_into_selected(self):
         try:
@@ -242,7 +248,7 @@ class StageMixin:
             self.selected_z_var.set(self._format_saved_z(z))
             self.log(f"Loaded current stage position into editor: X={x:.3f}, Y={y:.3f}, Z={self._format_saved_z(z) or '-'}")
             if used_dummy_z:
-                self.log("Saved dummy Z in the position editor because Z control is disabled.")
+                self.log("Saved dummy Z in the position editor because Z control is not connected.")
         except Exception as exc:
             self.log(f"Failed to capture current stage position: {exc}")
             self.update_state("Error")
@@ -498,31 +504,3 @@ class StageMixin:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _move_z_to_position(self, target_z):
-        """Move NIS Z to target_z via GET_Z then MOVE_REL. Blocks until confirmed.
-        Returns (confirmed_z, status_str). Always called from a worker thread."""
-        if not getattr(self, "z_motion_enabled", False):
-            return None, "Z control disabled"
-        with self.nis_z_request_lock:
-            timeout = int(self.nis_z_timeout_var.get())
-            tolerance = float(self.nis_z_tolerance_var.get())
-            nis = self._get_nis_z_controller()
-            try:
-                current_z = nis.get_z(timeout_sec=timeout)
-                self._safe_after(0, lambda z=current_z: self._set_nis_z_value(z))
-                dz = target_z - current_z
-                if abs(dz) <= tolerance:
-                    self._log_async(
-                        f"NIS Z already at {current_z:.3f} um (target {target_z:.3f} um, within {tolerance} um)."
-                    )
-                    return current_z, "ok"
-                self._log_async(
-                    f"NIS Z: moving from {current_z:.3f} to {target_z:.3f} um (delta={dz:+.3f} um)..."
-                )
-                confirmed_z = nis.move_rel(dz, timeout_sec=timeout)
-                self._safe_after(0, lambda z=confirmed_z: self._set_nis_z_value(z))
-                self._log_async(f"NIS Z confirmed at {confirmed_z:.3f} um (target {target_z:.3f} um).")
-                return confirmed_z, "ok"
-            except Exception as exc:
-                self._log_async(f"NIS Z move to {target_z:.3f} um failed: {exc}")
-                return None, str(exc)

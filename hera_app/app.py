@@ -10,14 +10,14 @@ import tkinter as tk
 import traceback
 from datetime import datetime
 
-from hera_app.controllers import HeraController, NISZBridgeController
+from hera_app.controllers import HeraController, MicroManagerZController
 from hera_app.mixins.acquisition import AcquisitionMixin
 from hera_app.mixins.device import DeviceMixin
 from hera_app.mixins.export import ExportMixin
 from hera_app.mixins.flatfield import FlatfieldMixin
 from hera_app.mixins.hyperspectral_viewer import HyperspectralViewerMixin
 from hera_app.mixins.live_view import LiveViewMixin
-from hera_app.mixins.nis_z_mixin import NISZMixin
+from hera_app.mixins.micro_z_mixin import MicroManagerZMixin
 from hera_app.mixins.roi import ROIMixin
 from hera_app.mixins.stage import StageMixin
 from hera_app.mixins.theme import ThemeMixin
@@ -32,7 +32,7 @@ class HeraTriggerApp(
     ThemeMixin,
     UIBuilderMixin,
     DeviceMixin,
-    NISZMixin,
+    MicroManagerZMixin,
     StageMixin,
     ExportMixin,
     FlatfieldMixin,
@@ -341,27 +341,32 @@ class HeraTriggerApp(
         self.start_acquisition_buttons = []
         self.stage_xy_motion_buttons = []
         self.stage_xy_stop_button = None
+        self.micro_z_motion_buttons = []
+        self.micro_z_stop_button = None
+        self.micro_z_toggle_button = None
         self.current_hyper_band_index = tk.IntVar(value=0)
         self.hyper_band_jump_var = tk.StringVar(value="1")
         self.current_hyper_wavelength_var = tk.StringVar(value="Wavelength: -")
         self.current_hyper_band_var = tk.StringVar(value="Band: -")
-        self.nis_z = None
-        self.nis_z_shared_root_var = tk.StringVar(value=NISZBridgeController.DEFAULT_SHARED_ROOT)
-        self.nis_z_current_z_var = tk.StringVar(value="Z: -")
-        self.nis_z_status_var = tk.StringVar(value="NIS Z: idle")
-        self.nis_z_timeout_var = tk.IntVar(value=90)
-        self.nis_z_step_var = tk.StringVar(value="1.0")
-        self.nis_z_tolerance_var = tk.DoubleVar(value=0.5)
+        self.micro_z = None
+        self.micro_z_mm_path_var = tk.StringVar(value=MicroManagerZController.DEFAULT_MM_PATH)
+        self.micro_z_config_var = tk.StringVar(value=MicroManagerZController.DEFAULT_CONFIG_PATH)
+        self.micro_z_device_var = tk.StringVar(value=MicroManagerZController.DEFAULT_DEVICE)
+        self.micro_z_current_z_var = tk.StringVar(value="Z: disconnected")
+        self.micro_z_status_var = tk.StringVar(value="Z: disconnected")
+        self.micro_z_toggle_text_var = tk.StringVar(value="Connect Z")
+        self.micro_z_target_var = tk.StringVar(value="")
+        self.micro_z_step_var = tk.StringVar(value="0.1")
+        self.micro_z_tolerance_var = tk.DoubleVar(value=0.5)
+        self.micro_z_connected = False
+        self.micro_z_poll_job = None
+        self.micro_z_poll_inflight = False
+        self.micro_z_request_lock = threading.Lock()
+        self.micro_z_poll_interval_ms = 2000
+        self.z_last_value = None
+        self.z_last_status = "disconnected"
         self.z_motion_enabled = False
-        if not self.z_motion_enabled:
-            self.nis_z_current_z_var.set("Z: disabled")
-            self.nis_z_status_var.set("Z motion: disabled")
-        self.nis_z_last_value = None
-        self.nis_z_last_status = "not checked"
-        self.nis_z_poll_job = None
-        self.nis_z_poll_inflight = False
-        self.nis_z_request_lock = threading.Lock()
-        self.nis_z_poll_interval_ms = 30000
+        self.timelapse_z_motion_enabled = False
         self.dummy_z_position = 0.0
         self._configure_theme()
         self._build_ui()
@@ -371,8 +376,6 @@ class HeraTriggerApp(
         self._start_ui_call_queue_pump()
         self.start_stage_polling()
         self._safe_after(250, self.auto_connect_devices)
-        if self.z_motion_enabled:
-            self._safe_after(5000, self.start_nis_z_polling)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _live_cursor_status_text(self, text):
@@ -391,8 +394,8 @@ class HeraTriggerApp(
             "live_profile_status_var",
             "live_roi_status_var",
             "flatfield_status_var",
-            "nis_z_current_z_var",
-            "nis_z_status_var",
+            "micro_z_current_z_var",
+            "micro_z_status_var",
             "hdr_status_var",
             "stage_status_var",
             "stage_status_display_var",
@@ -705,6 +708,8 @@ class HeraTriggerApp(
             "flatfield",
             "roi",
             "nis z",
+            "micro-manager z",
+            "z ",
             "tango",
             "hera",
         )
@@ -756,7 +761,7 @@ class HeraTriggerApp(
         self.resume_live_after_acquisition = False
         for job_attr in (
             "stage_poll_job",
-            "nis_z_poll_job",
+            "micro_z_poll_job",
             "live_watchdog_job",
             "_auto_apply_parameters_job",
             "ui_queue_poll_job",
@@ -844,6 +849,13 @@ class HeraTriggerApp(
             except Exception:
                 pass
             self._write_detail_log_line(f"Could not stop Hera helper service cleanly during shutdown: {exc}")
+        try:
+            if getattr(self, "micro_z", None):
+                self.micro_z.disconnect()
+                self.micro_z = None
+                self._write_detail_log_line("Disconnected Micro-Manager Z during shutdown.")
+        except Exception:
+            pass
         try:
             if self.tango and self.tango.connected:
                 with self.stage_lock:
