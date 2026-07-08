@@ -115,6 +115,8 @@ class TimelapseMixin:
             return
         if not self._validate_auto_save_export_options():
             return
+        if not self._validate_timelapse_z_plan(cycle_positions):
+            return
 
         self.timelapse_stop_event.clear()
         self.timelapse_pause_event.clear()
@@ -134,6 +136,7 @@ class TimelapseMixin:
         self.timelapse_thread.start()
         site_label = self._timelapse_site_selection_label(cycle_positions)
         self.log(self._roi_plan_message(f"Running one loop for site(s): {site_label}", cycle_positions))
+        self.log(self._z_plan_message(f"Running one loop for site(s): {site_label}", cycle_positions))
         self.log(f"Auto-save products: {self._export_selection_text()}.")
 
     def start_timelapse(self):
@@ -155,6 +158,8 @@ class TimelapseMixin:
             return
         if not self._validate_auto_save_export_options():
             return
+        if not self._validate_timelapse_z_plan(timelapse_positions):
+            return
 
         self.timelapse_stop_event.clear()
         self.timelapse_pause_event.clear()
@@ -175,6 +180,7 @@ class TimelapseMixin:
         self.timelapse_thread.start()
         site_label = self._timelapse_site_selection_label(timelapse_positions)
         self.log(self._roi_plan_message(f"Timelapse started for site(s): {site_label}", timelapse_positions))
+        self.log(self._z_plan_message(f"Timelapse started for site(s): {site_label}", timelapse_positions))
         self.log(f"Auto-save products: {self._export_selection_text()}.")
 
     def pause_or_resume_timelapse(self):
@@ -267,6 +273,32 @@ class TimelapseMixin:
             self._log_async(f"Could not abort current Hera acquisition during timelapse stop/timeout: {exc}")
         return aborted
 
+    def _start_live_view_for_interval(self):
+        if getattr(self, "is_closing", False):
+            return
+
+        def request_live_view():
+            if getattr(self, "is_closing", False):
+                return
+            if self.timelapse_stop_event.is_set():
+                return
+            if getattr(self, "acquisition_inflight", False) or getattr(self, "hera_service_acquisition_inflight", False):
+                return
+            if not self.controller or not self.controller.connected:
+                self.log("Interval wait: reconnecting Hera so live view can run for focus adjustment.")
+                self._schedule_helper_reconnect()
+                return
+            try:
+                if self.controller.is_live_capturing():
+                    self.log("Interval wait: live view is already running for focus adjustment.", detail=True)
+                    return
+            except Exception:
+                pass
+            self.log("Interval wait: starting live view for focus adjustment.")
+            self.start_live_view()
+
+        self._safe_after(0, request_live_view)
+
     def _timelapse_worker(self, single_cycle=False, positions_override=None, run_id=None):
         if run_id is None:
             run_id = self.timelapse_run_id
@@ -309,6 +341,7 @@ class TimelapseMixin:
                 else:
                     next_cycle_time = datetime.now() + timedelta(minutes=interval_min)
                     self.next_loop_deadline = next_cycle_time
+                    self._start_live_view_for_interval()
                     self._log_async(
                         f"Cycle {cycle} complete. Waiting {interval_min:.2f} minutes from loop completion before next cycle."
                     )
@@ -369,7 +402,22 @@ class TimelapseMixin:
         self._log_async(f"Trigger log saved: {log_path}")
 
     def _trigger_log_fieldnames(self):
-        return ["Cycle", "Site", "Attempt", "X", "Y", "Z", "ZStatus", "Timestamp", "ExportPath", "ROI", "Status", "Error"]
+        return [
+            "Cycle",
+            "Site",
+            "Attempt",
+            "X",
+            "Y",
+            "TargetZ",
+            "Z",
+            "ZDelta",
+            "ZStatus",
+            "Timestamp",
+            "ExportPath",
+            "ROI",
+            "Status",
+            "Error",
+        ]
 
     def _begin_trigger_log_file(self):
         try:
@@ -425,10 +473,11 @@ class TimelapseMixin:
             try:
                 if attempt > 1:
                     self._log_async(f"Retrying {position.name} (attempt {attempt}/{attempts})...")
-                export_path, confirmed_z, z_status = self.run_stage_site_acquisition(position, cycle_index=cycle_index)
+                export_path, target_z, confirmed_z, z_status = self.run_stage_site_acquisition(position, cycle_index=cycle_index)
                 if self.timelapse_stop_event.is_set():
                     raise TimelapseStopped("Timelapse stopped by user.")
                 x, y = self._current_stage_xy_strings()
+                z_delta = confirmed_z - target_z if confirmed_z is not None and target_z is not None else None
                 self._record_trigger_log_entry(
                     {
                         "Cycle": cycle_index,
@@ -436,7 +485,9 @@ class TimelapseMixin:
                         "Attempt": attempt,
                         "X": x,
                         "Y": y,
+                        "TargetZ": f"{target_z:.6f}" if target_z is not None else "",
                         "Z": f"{confirmed_z:.6f}" if confirmed_z is not None else "",
+                        "ZDelta": f"{z_delta:.6f}" if z_delta is not None else "",
                         "ZStatus": z_status,
                         "Timestamp": datetime.now().isoformat(timespec="seconds"),
                         "ExportPath": export_path,
@@ -546,15 +597,82 @@ class TimelapseMixin:
             return f"{hours:d}:{minutes:02d}:{sec:02d}"
         return f"{minutes:02d}:{sec:02d}"
 
-    def _timelapse_site_z_target(self, position):
-        if not getattr(self, "timelapse_z_motion_enabled", False):
-            return None, "Z auto-move disabled"
+    def _timelapse_saved_z_enabled(self):
+        return bool(getattr(self, "timelapse_z_motion_enabled", False))
+
+    def _position_saved_z_value(self, position):
         try:
             target_z = float(position.z)
         except (TypeError, ValueError):
-            return None, "no Z"
+            return None
         if math.isnan(target_z):
-            return None, "no Z"
+            return None
+        return target_z
+
+    def _position_has_real_saved_z(self, position):
+        target_z = self._position_saved_z_value(position)
+        if target_z is None:
+            return False
+        if getattr(position, "z_is_real", False):
+            return True
+        try:
+            dummy_z = float(getattr(self, "dummy_z_position", 0.0))
+            if abs(target_z - dummy_z) <= 1e-9:
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _z_plan_message(self, label, positions):
+        positions = list(positions)
+        if not self._timelapse_saved_z_enabled():
+            return f"{label}. Saved Z auto-move is off; acquisitions will move XY only."
+        real_z_count = sum(1 for position in positions if self._position_has_real_saved_z(position))
+        return f"{label}. Using saved Z for {real_z_count}/{len(positions)} site(s)."
+
+    def _validate_timelapse_z_plan(self, positions):
+        positions = list(positions)
+        if not self._timelapse_saved_z_enabled():
+            return True
+        if not getattr(self, "micro_z_connected", False):
+            self.log("Connect Z before running a site sequence; saved Z movement is always enabled.")
+            return False
+        missing = [position.name for position in positions if not self._position_has_real_saved_z(position)]
+        if missing:
+            self.log(
+                "Saved Z movement is enabled, but these site(s) do not have a real saved Z: "
+                + ", ".join(missing)
+                + ". Connect Z and update those sites before running."
+            )
+            return False
+        range_errors = []
+        for position in positions:
+            target_z = self._position_saved_z_value(position)
+            if target_z is None:
+                continue
+            try:
+                range_error = self._micro_z_validate_target_range(target_z)
+            except Exception as exc:
+                range_error = str(exc)
+            if range_error:
+                range_errors.append(f"{position.name}: {range_error}")
+        if range_errors:
+            self.log("Saved Z safety check failed: " + "; ".join(range_errors))
+            return False
+        return True
+
+    def _timelapse_site_z_target(self, position):
+        if not self._timelapse_saved_z_enabled():
+            return None, "Z auto-move disabled"
+        target_z = self._position_saved_z_value(position)
+        if target_z is None or not self._position_has_real_saved_z(position):
+            return None, "no saved Z"
+        try:
+            range_error = self._micro_z_validate_target_range(target_z)
+        except Exception as exc:
+            range_error = str(exc)
+        if range_error:
+            return None, f"saved Z rejected: {range_error}"
         if not getattr(self, "micro_z_connected", False) or getattr(self, "z_last_value", None) is None:
             return None, "Z skipped: Micro-Manager Z not connected"
         if str(getattr(self, "z_last_status", "")).lower() != "ok":
@@ -572,26 +690,29 @@ class TimelapseMixin:
             self.update_stage_position_display()
             self._set_var_async(self.current_site_var, position.name)
 
-            dwell = float(self.stage_dwell_var.get())
-            if dwell > 0:
-                self.log(f"Settling at {position.name} for {dwell:.1f} seconds.")
-                time.sleep(dwell)
-
         if self.timelapse_stop_event.is_set():
             raise TimelapseStopped("Timelapse stopped before acquisition.")
 
-        # Z auto-move remains disabled until manual Nikon Ti Z control is fully validated in the app.
         confirmed_z = None
         z_status = "no Z"
         target_z, z_status = self._timelapse_site_z_target(position)
         if target_z is not None:
             self._log_async(f"Micro-Manager Z targeting {target_z:.3f} um for {position.name}...")
-            confirmed_z, z_status = self._move_z_to_position(target_z)
-        elif z_status not in ("no Z", "Z auto-move disabled"):
+            confirmed_z, z_status = self._move_z_to_position(target_z, label=f"{position.name} cycle {cycle_index or '-'}")
+            if z_status != "ok":
+                raise RuntimeError(f"Could not move Z for {position.name}: {z_status}")
+        elif self._timelapse_saved_z_enabled():
+            raise RuntimeError(f"Could not move Z for {position.name}: {z_status}")
+        elif z_status not in ("no Z", "no saved Z", "Z auto-move disabled"):
             self._log_async(f"{z_status} for {position.name}; starting Hera acquisition without Z move.")
 
         if self.timelapse_stop_event.is_set():
             raise TimelapseStopped("Timelapse stopped before acquisition.")
+
+        dwell = float(self.stage_dwell_var.get())
+        if dwell > 0:
+            self.log(f"Settling at {position.name} for {dwell:.1f} seconds after XY/Z move.")
+            time.sleep(dwell)
 
         self.log(f"Starting Hera acquisition at {position.name}.")
         if cycle_index is None:
@@ -605,4 +726,4 @@ class TimelapseMixin:
             self.log(f"No ROI saved for {position.name}; acquiring full frame.")
         self._arm_and_start_acquisition(export_tag=export_tag, forced_roi=site_roi)
         export_path = self._await_timelapse_acquisition_completion()
-        return export_path, confirmed_z, z_status
+        return export_path, target_z, confirmed_z, z_status

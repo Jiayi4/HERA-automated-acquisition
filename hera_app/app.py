@@ -358,6 +358,9 @@ class HeraTriggerApp(
         self.micro_z_target_var = tk.StringVar(value="")
         self.micro_z_step_var = tk.StringVar(value="0.1")
         self.micro_z_tolerance_var = tk.DoubleVar(value=0.5)
+        self.micro_z_min_var = tk.StringVar(value="0")
+        self.micro_z_max_var = tk.StringVar(value="11000")
+        self.micro_z_max_jump_var = tk.StringVar(value="50")
         self.micro_z_connected = False
         self.micro_z_poll_job = None
         self.micro_z_poll_inflight = False
@@ -366,7 +369,7 @@ class HeraTriggerApp(
         self.z_last_value = None
         self.z_last_status = "disconnected"
         self.z_motion_enabled = False
-        self.timelapse_z_motion_enabled = False
+        self.timelapse_z_motion_enabled = True
         self.dummy_z_position = 0.0
         self._configure_theme()
         self._build_ui()

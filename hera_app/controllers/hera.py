@@ -12,6 +12,7 @@ class SavedPosition:
     y: float
     z: float = math.nan
     roi: tuple = None
+    z_is_real: bool = False
 
 
 class HeraDeviceInfo(ctypes.Structure):

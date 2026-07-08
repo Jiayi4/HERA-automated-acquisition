@@ -54,11 +54,12 @@ Open the relevant mixin/controller directly before editing. Use search if a meth
 - Live ROI is display-driven: two clicks on the rendered live image are inverse-mapped to Hera live-frame pixels and copied into ROI fields.
 - Keep the user-selected export ROI separate from camera ROI readback. Hera can report ROI as read-only/full-frame even when the user selected a smaller region.
 - ROI can be edited by corners, size fields, or area helper, but Hera ultimately receives rectangular `x, y, width, height`. Normalize corner edits back to rectangular ROI fields and update `roi_selection_active` / `selected_export_roi`.
-- Saved positions include per-site ROI in `SavedPosition.roi`. Adding/updating/saving a site captures the active ROI; selecting a site restores it.
-- Manual site runs, `Run First 2 Sites`, and timelapse use the saved ROI for each site, falling back to the timelapse-start ROI only when the site has no saved ROI.
+- Saved positions include per-site ROI in `SavedPosition.roi` and real-Z state in `SavedPosition.z_is_real`. Adding/updating/saving a site captures the active ROI; selecting a site restores it.
+- Manual site runs and timelapse use the saved ROI for each site, falling back to the timelapse-start ROI only when the site has no saved ROI.
 - The saved positions list starts empty. Do not seed a default `Start` or `0,0` position.
 - If Micro-Manager Z is unavailable, save `dummy_z_position` (`0.000`) so XY sites remain usable.
-- Timelapse auto Z movement is disabled by default. Manual `Go To Z` is available after `Connect Z`; do not enable automatic Z motion unless the user explicitly asks.
+- Timelapse saved-Z movement is always enabled. Timelapse validates Micro-Manager Z is connected and every selected site has a real saved Z before starting. Site runs move XY first, then saved Z, then dwell, then HERA acquisition. Do not move to dummy `0.000` as an autofocus/saved-Z target.
+- Z moves must pass the configured `Safe Z` range and `Max Jump` checks. Trigger logs should keep target Z, confirmed Z, and Z delta for each site acquisition.
 
 ## Hyperspectral, Export, And HyperLAB
 

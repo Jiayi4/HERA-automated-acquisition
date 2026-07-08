@@ -39,6 +39,56 @@ class MicroManagerZMixin:
             self.micro_z_current_z_var.set(f"Z: {status}")
         self.micro_z_status_var.set(f"Z: {status}")
 
+    def _micro_z_optional_float_setting(self, var_name, label):
+        var = getattr(self, var_name, None)
+        if var is None:
+            return None
+        text = str(var.get()).strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except Exception:
+            raise RuntimeError(f"{label} must be a number or blank.")
+
+    def _micro_z_validate_target_range(self, target_z):
+        target_z = float(target_z)
+        min_z = self._micro_z_optional_float_setting("micro_z_min_var", "Z min")
+        max_z = self._micro_z_optional_float_setting("micro_z_max_var", "Z max")
+        if min_z is not None and max_z is not None and min_z > max_z:
+            return f"Z min ({min_z:.3f} um) must be <= Z max ({max_z:.3f} um)."
+        if min_z is not None and target_z < min_z:
+            return f"target Z {target_z:.3f} um is below Z min {min_z:.3f} um."
+        if max_z is not None and target_z > max_z:
+            return f"target Z {target_z:.3f} um is above Z max {max_z:.3f} um."
+        return None
+
+    def _micro_z_validate_move_safety(self, target_z, current_z=None):
+        range_error = self._micro_z_validate_target_range(target_z)
+        if range_error:
+            return range_error
+        if current_z is None:
+            return None
+        max_jump = self._micro_z_optional_float_setting("micro_z_max_jump_var", "Max Z jump")
+        if max_jump is None:
+            return None
+        if max_jump <= 0:
+            return "Max Z jump must be greater than 0 um or blank."
+        jump = abs(float(target_z) - float(current_z))
+        if jump > max_jump:
+            return (
+                f"Z jump {jump:.3f} um exceeds Max Jump {max_jump:.3f} um "
+                f"(current {float(current_z):.3f} um, target {float(target_z):.3f} um)."
+            )
+        return None
+
+    def _log_micro_z_motion_result(self, label, target_z, confirmed_z):
+        delta = float(confirmed_z) - float(target_z)
+        self._log_async(
+            f"{label}: target Z={float(target_z):.3f} um, "
+            f"confirmed Z={float(confirmed_z):.3f} um, delta={delta:+.3f} um."
+        )
+
     def toggle_micro_z_connection(self):
         if getattr(self, "micro_z_connected", False):
             self.disconnect_micro_z_async()
@@ -122,8 +172,11 @@ class MicroManagerZMixin:
     def _micro_z_move_abs_from_target(self):
         try:
             target_z = float(self.micro_z_target_var.get())
+            safety_error = self._micro_z_validate_target_range(target_z)
+            if safety_error:
+                raise RuntimeError(safety_error)
         except Exception as exc:
-            self.log(f"Go To Z ignored: enter a valid target Z. ({exc})")
+            self.log(f"Go To Z ignored: enter a valid and safe target Z. ({exc})")
             return
         self._micro_z_move_abs(target_z)
 
@@ -138,10 +191,15 @@ class MicroManagerZMixin:
             with self.micro_z_request_lock:
                 try:
                     z_controller = self._get_micro_z_controller()
+                    current_z = z_controller.get_z()
+                    self._safe_after(0, lambda z=current_z: self._set_micro_z_value(z))
+                    safety_error = self._micro_z_validate_move_safety(target_z, current_z)
+                    if safety_error:
+                        raise RuntimeError(safety_error)
                     z = z_controller.move_abs(target_z)
                     self.micro_z_connected = True
                     self._safe_after(0, lambda z=z: self._set_micro_z_value(z))
-                    self._log_async(f"Micro-Manager Z reached {z:.3f} um (target {target_z:.3f} um).")
+                    self._log_micro_z_motion_result("Manual Z move", target_z, z)
                 except Exception as exc:
                     self._log_async(f"Micro-Manager Z move to {target_z:.3f} um failed: {exc}")
                     self._safe_after(0, lambda exc=exc: self._set_micro_z_status(f"move failed: {exc}"))
@@ -163,10 +221,13 @@ class MicroManagerZMixin:
                     z_controller = self._get_micro_z_controller()
                     current_z = z_controller.get_z()
                     target_z = current_z + float(dz)
+                    safety_error = self._micro_z_validate_move_safety(target_z, current_z)
+                    if safety_error:
+                        raise RuntimeError(safety_error)
                     z = z_controller.move_abs(target_z)
                     self.micro_z_connected = True
                     self._safe_after(0, lambda z=z: self._set_micro_z_value(z))
-                    self._log_async(f"Micro-Manager Z jog {dz:+.3f} um: {current_z:.3f} -> {z:.3f} um.")
+                    self._log_micro_z_motion_result(f"Manual Z jog {dz:+.3f} um", target_z, z)
                 except Exception as exc:
                     self._log_async(f"Micro-Manager Z jog {dz:+.3f} um failed: {exc}")
                     self._safe_after(0, lambda exc=exc: self._set_micro_z_status(f"jog failed: {exc}"))
@@ -211,7 +272,7 @@ class MicroManagerZMixin:
             self.log(f"Could not read Micro-Manager Z while saving site: {exc}")
             return math.nan
 
-    def _move_z_to_position(self, target_z):
+    def _move_z_to_position(self, target_z, label="Micro-Manager Z move"):
         """Move Nikon Ti Z to target_z. Blocks until confirmed; worker-thread only."""
         if not getattr(self, "micro_z_connected", False):
             return None, "Z not connected"
@@ -221,15 +282,21 @@ class MicroManagerZMixin:
                 tolerance = float(self.micro_z_tolerance_var.get())
                 current_z = self._get_micro_z_controller().get_z()
                 self._safe_after(0, lambda z=current_z: self._set_micro_z_value(z))
+                safety_error = self._micro_z_validate_move_safety(target_z, current_z)
+                if safety_error:
+                    self._log_async(f"{label} rejected: {safety_error}")
+                    return None, safety_error
                 if abs(target_z - current_z) <= tolerance:
                     self._log_async(
                         f"Micro-Manager Z already at {current_z:.3f} um "
                         f"(target {target_z:.3f} um, within {tolerance:.3f} um)."
                     )
+                    self._log_micro_z_motion_result(label, target_z, current_z)
                     return current_z, "ok"
                 self._log_async(f"Micro-Manager Z moving {current_z:.3f} -> {target_z:.3f} um.")
                 confirmed_z = self._get_micro_z_controller().move_abs(target_z)
                 self._safe_after(0, lambda z=confirmed_z: self._set_micro_z_value(z))
+                self._log_micro_z_motion_result(label, target_z, confirmed_z)
                 return confirmed_z, "ok"
             except Exception as exc:
                 try:

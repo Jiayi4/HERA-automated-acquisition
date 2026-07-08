@@ -491,10 +491,10 @@ class UIBuilderMixin:
         self._build_micro_z_ui(stage_tab)
 
         saved = tk.LabelFrame(stage_tab, text="Saved Sites", padx=6, pady=5)
-        saved.pack(fill="x", pady=(0, 6))
+        saved.pack(fill="both", expand=True, pady=(0, 6))
         tree_wrap = tk.Frame(saved)
         tree_wrap.pack(fill="both", expand=True)
-        self.positions_tree = ttk.Treeview(tree_wrap, columns=("site", "name", "x", "y", "z", "roi"), show="headings", height=16, style="Dark.Treeview", selectmode="extended")
+        self.positions_tree = ttk.Treeview(tree_wrap, columns=("site", "name", "x", "y", "z", "roi"), show="headings", height=12, style="Dark.Treeview", selectmode="extended")
         for name, label, width, anchor in (
             ("site", "Site", 34, "center"),
             ("name", "Name", 74, "w"),
@@ -519,12 +519,18 @@ class UIBuilderMixin:
         position_panel.pack(fill="x", pady=(0, 6))
         tk.Label(position_panel, text="Site Name").pack(anchor="w")
         tk.Entry(position_panel, textvariable=self.selected_name_var, width=20).pack(fill="x", pady=(1, 4))
-        for text, command in (
-            ("Add New Site", self.add_current_position),
-            ("Update Selected Site", self.update_selected_position),
-            ("Rename Selected Site", self.rename_selected_position),
+        site_buttons = tk.Frame(position_panel)
+        site_buttons.pack(fill="x")
+        for index, (text, command) in enumerate(
+            (
+                ("Add New", self.add_current_position),
+                ("Update", self.update_selected_position),
+                ("Rename", self.rename_selected_position),
+            )
         ):
-            tk.Button(position_panel, text=text, command=command).pack(fill="x", pady=1)
+            tk.Button(site_buttons, text=text, command=command, width=8).pack(
+                side="left", padx=(0, 3 if index < 2 else 0)
+            )
 
     def _build_center_workspace(self, parent):
         spectral = tk.LabelFrame(parent, text="Control Bar", padx=8, pady=6)
@@ -1094,6 +1100,15 @@ class UIBuilderMixin:
         self.micro_z_stop_button = tk.Button(move_row, text="Stop Z", command=self._micro_z_stop, width=7, state="disabled")
         self.micro_z_stop_button._hera_control_bar_button = True
         self.micro_z_stop_button.pack(side="left", padx=(1, 0))
+
+        safety_row = tk.Frame(frame)
+        safety_row.pack(fill="x", pady=(4, 0))
+        tk.Label(safety_row, text="Safe Z").pack(side="left", padx=(0, 3))
+        tk.Entry(safety_row, textvariable=self.micro_z_min_var, width=5).pack(side="left", padx=(0, 2))
+        tk.Label(safety_row, text="-").pack(side="left")
+        tk.Entry(safety_row, textvariable=self.micro_z_max_var, width=5).pack(side="left", padx=(2, 5))
+        tk.Label(safety_row, text="Max Jump").pack(side="left", padx=(0, 3))
+        tk.Entry(safety_row, textvariable=self.micro_z_max_jump_var, width=5).pack(side="left")
 
     def _build_nis_z_ui(self, parent):
         frame = tk.LabelFrame(parent, text="NIS Z Bridge", padx=6, pady=5)

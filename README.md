@@ -88,7 +88,7 @@ C:\BIOS DATA\jiayi\APP
 4. Set camera parameters in `Parameters`: gain, exposure, and `16-bit HDR`.
 5. Set spectral options in `Control Bar`: spectral mode, sampling mode, bands, averaging, binning, and data type. Press `Set` after editing these controls.
 6. Select or clear ROI in the `ROI` panel. The `Active ROI` line shows width, height, and area.
-7. If Nikon Ti Z should be recorded, click `Connect Z` in the `Stage` tab. Then add or update sites in `Saved Sites`; each site stores the current XY, current Z, and active ROI.
+7. If Nikon Ti Z should be recorded or reused during timelapse, click `Connect Z` in the `Stage` tab. Then add or update sites in `Saved Sites`; each site stores the current XY, current Z, and active ROI.
 8. Choose export folder/name/stamp and select exactly which products to save: `_raw`, `_ref`, and/or `_nrm`.
 9. Use `Start Single Acquisition`, `Run One Loop`, or `Run Timelapse`.
 10. Watch `Run Status` for Status, Site, Cycle, Next loop, Total run time, and progress. `Total run time` tracks either a running timelapse or the current single acquisition.
@@ -118,7 +118,7 @@ When the SDK returns a full-frame hypercube, the app can still crop the ENVI out
 
 ## Stage, XY Control, And Saved Sites
 
-The `Stage` tab shows stage connection status, live XY coordinates, and optional live Nikon Ti Z. `XY Control` can move to a target XY position or jog by the selected step size. `Z Control` connects to Micro-Manager, reads live Z, jogs Z, or moves to a typed target Z.
+The `Stage` tab shows stage connection status, live XY coordinates, and optional live Nikon Ti Z. `XY Control` can move to a target XY position or jog by the selected step size. `Z Control` connects to Micro-Manager, reads live Z, jogs Z, or moves to a typed target Z. `Safe Z` and `Max Jump` limit manual Z moves, `Go To` saved-site moves, and timelapse saved-Z moves.
 
 `Saved Sites` stores:
 
@@ -128,7 +128,7 @@ The `Stage` tab shows stage connection status, live XY coordinates, and optional
 - Z position when Micro-Manager Z is connected, otherwise a dummy placeholder.
 - Active ROI at the time the site was added or updated.
 
-Timelapse Z auto-move is currently disabled for safety. Saved sites keep real Z values after `Connect Z`, and manual `Go To Z` is available, but timelapse movement remains XY-only unless Z auto-move is explicitly enabled later.
+Saved Z movement is always enabled for `Run One Loop` and `Run Timelapse`: Micro-Manager Z must be connected and every selected site must have a real saved Z inside the configured `Safe Z` range. Each site run moves XY first, then moves to that site's saved Z if the jump is within `Max Jump`, waits the configured `Dwell (s)`, and starts acquisition. Trigger logs include target Z, confirmed Z, and Z delta.
 
 The timelapse `Sites` field accepts `all`, comma-separated site numbers, and ranges such as `1-5`.
 
@@ -138,7 +138,7 @@ The timelapse `Sites` field accepts `all`, comma-separated site numbers, and ran
 
 `Run One Loop` runs the selected sites once.
 
-`Run Timelapse` repeats selected-site loops. The `Interval (min)` value is the wait time from the end of one loop to the start of the next loop; `0` starts the next loop immediately. The app also waits the configured `Dwell (s)` after moving to a site before starting acquisition.
+`Run Timelapse` repeats selected-site loops. The `Interval (min)` value is the wait time from the end of one loop to the start of the next loop; `0` starts the next loop immediately. The app waits the configured `Dwell (s)` after moving to a site's XY and saved Z before starting acquisition.
 
 `Pause` pauses between acquisition steps and can be pressed again to resume. `Stop Timelapse` requests the timelapse worker to stop after the current safe point. `Abort Acquisition` is for the active HERA acquisition.
 

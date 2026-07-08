@@ -123,6 +123,22 @@ class StageMixin:
         text = text.strip()
         return float(text) if text else float(self.dummy_z_position)
 
+    def _parse_optional_z_with_state(self, text):
+        text = text.strip()
+        if not text:
+            return float(self.dummy_z_position), False
+        z = float(text)
+        try:
+            if (
+                abs(z - float(self.dummy_z_position)) <= 1e-9
+                and not getattr(self, "micro_z_connected", False)
+                and getattr(self, "z_last_value", None) is None
+            ):
+                return z, False
+        except Exception:
+            pass
+        return z, True
+
     def _next_site_name(self):
         existing = {pos.name for pos in self.positions}
         n = 1
@@ -151,7 +167,7 @@ class StageMixin:
             name = self._unique_position_name(requested_name)
             z, used_dummy_z = self._get_position_save_z()
             roi = self._capture_current_roi_for_position()
-            self.positions.append(SavedPosition(name, x, y, z, roi))
+            self.positions.append(SavedPosition(name, x, y, z, roi, z_is_real=not used_dummy_z))
             self.selected_position_index = len(self.positions) - 1
             self._populate_selected_position_fields(self.positions[self.selected_position_index])
             self.refresh_positions_tree()
@@ -261,10 +277,10 @@ class StageMixin:
                 raise RuntimeError("Enter a position name first.")
             x = float(self.selected_x_var.get())
             y = float(self.selected_y_var.get())
-            z = self._parse_optional_z(self.selected_z_var.get())
+            z, z_is_real = self._parse_optional_z_with_state(self.selected_z_var.get())
             roi = self._capture_current_roi_for_position()
             if self.selected_position_index is None:
-                self.positions.append(SavedPosition(name, x, y, z, roi))
+                self.positions.append(SavedPosition(name, x, y, z, roi, z_is_real=z_is_real))
                 self.selected_position_index = len(self.positions) - 1
                 self.log(
                     f"Added new position {name} at X={x:.3f}, Y={y:.3f}, "
@@ -277,6 +293,7 @@ class StageMixin:
                 position.y = y
                 position.z = z
                 position.roi = roi
+                position.z_is_real = z_is_real
                 self.log(
                     f"Saved edits for {name}: X={x:.3f}, Y={y:.3f}, "
                     f"Z={self._format_saved_z(z) or '-'}, ROI={self._format_roi_short(roi)}."
@@ -319,6 +336,7 @@ class StageMixin:
             position.x = x
             position.y = y
             position.z, used_dummy_z = self._get_position_save_z()
+            position.z_is_real = not used_dummy_z
             position.roi = self._capture_current_roi_for_position()
             self._populate_selected_position_fields(position)
             self.refresh_positions_tree()
@@ -453,6 +471,70 @@ class StageMixin:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _move_stage_to_saved_position_async(self, position):
+        name = str(position.name)
+        target_x = float(position.x)
+        target_y = float(position.y)
+        target_z = None
+        has_saved_z = False
+        try:
+            has_saved_z = bool(self._position_has_real_saved_z(position))
+        except Exception:
+            try:
+                has_saved_z = not math.isnan(float(position.z))
+            except Exception:
+                has_saved_z = False
+        if has_saved_z:
+            target_z = float(position.z)
+
+        if getattr(self, "stage_motion_inflight", False):
+            self.log(f"{name} ignored because stage motion is still in progress.")
+            return
+        self.stage_motion_inflight = True
+        self.stage_motion_stop_requested = False
+        self._refresh_run_action_controls()
+
+        def worker():
+            try:
+                if not self.tango or not self.tango.connected:
+                    raise RuntimeError("Connect the stage before moving.")
+                with self.stage_lock:
+                    speed_xy = float(self.stage_speed_var.get())
+                    if speed_xy <= 0:
+                        raise RuntimeError("Stage speed must be greater than zero.")
+                    self.tango.apply_motion_settings(speed_xy=speed_xy, accel_xy=1.0, secure_vel_xy=50.0)
+                    self._log_async(f"Moving stage to {name}.")
+                    self.tango.move_absolute_xy(target_x, target_y)
+                    self.tango.wait_for_xy_stop(60000)
+                    self._safe_after(0, self.update_stage_position_display)
+
+                if getattr(self, "stage_motion_stop_requested", False):
+                    self._log_async("Stage XY motion stopped before saved Z move.")
+                    return
+
+                if has_saved_z:
+                    if getattr(self, "micro_z_connected", False):
+                        self._log_async(f"Moving Z to saved focus for {name}: {target_z:.3f} um.")
+                        confirmed_z, z_status = self._move_z_to_position(target_z, label=f"{name} Go To")
+                        if z_status == "ok" and confirmed_z is not None:
+                            self._log_async(f"Reached {name}: Z={confirmed_z:.3f} um.")
+                        else:
+                            self._log_async(f"Reached {name} XY, but saved Z move failed: {z_status}.")
+                            self._safe_after(0, lambda: self.update_state("Error"))
+                    else:
+                        self._log_async(f"Reached {name} XY. Connect Z to also move to saved focus.")
+                else:
+                    self._log_async(f"Reached {name} XY. No saved Z for this site.")
+            except Exception as exc:
+                self._log_async(f"Stage site move failed: {exc}")
+                self._safe_after(0, lambda: self.update_state("Error"))
+            finally:
+                self.stage_motion_inflight = False
+                self.stage_motion_stop_requested = False
+                self._safe_after(0, self._refresh_run_action_controls)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def stop_stage_xy_motion(self):
         if not self.tango or not self.tango.connected:
             self.log("Connect the stage before stopping XY motion.")
@@ -477,7 +559,7 @@ class StageMixin:
             self.log(f"Failed to go to selected position: {exc}")
             self.update_state("Error")
             return
-        self._move_stage_to_xy_async(position.x, position.y, position.name)
+        self._move_stage_to_saved_position_async(position)
 
     def manual_trigger_selected_position(self):
         try:
@@ -495,7 +577,7 @@ class StageMixin:
 
         def worker():
             try:
-                export_path, confirmed_z, _ = self.run_stage_site_acquisition(position)
+                export_path, _, confirmed_z, _ = self.run_stage_site_acquisition(position)
                 z_info = f", Z={confirmed_z:.3f} um" if confirmed_z is not None else ""
                 self._log_async(f"Manual site run completed for {position.name}{z_info}: {export_path}")
             except Exception as exc:
