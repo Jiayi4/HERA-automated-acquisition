@@ -166,6 +166,10 @@ class UIBuilderMixin:
             var_name,
             self.param_vars.get("gain"),
             self.param_vars.get("exposure"),
+        ):
+            return self._schedule_auto_apply_parameters
+        if self._var_matches(
+            var_name,
             self.param_vars.get("bands"),
             self.param_vars.get("stabilization"),
         ):
