@@ -93,6 +93,8 @@ ROI can be selected in Live View or entered as width/height. `Apply Box` uses th
 
 The app keeps the user-selected ROI for display/export even when the SDK reports ROI as full-frame or read-only. If the SDK returns a full-frame cube, the app can crop display and ENVI output to match the selected ROI.
 
+With Hera SDK 1.5.2 or newer, the app uses the current HyperCube spectral-sampling API, explicitly enables exposure/frame-count normalization (`NormalizationAll`), and keeps apodization at the SDK default (`-1.0`). These processing settings and the SDK version are written to logs and ENVI descriptions.
+
 ## Stage, Saved Sites, And Z
 
 `Saved Sites` stores site number, name, XY, active ROI, and Z when Micro-Manager Z is connected. If Z is unavailable, a dummy `0.000` placeholder is stored and is not treated as a real focus target.

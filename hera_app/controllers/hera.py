@@ -27,6 +27,8 @@ class HeraDeviceInfo(ctypes.Structure):
 class HeraController:
     OK_STATUS = 0
     HYPERSPECTRAL_DATA_OK = 0
+    HYPERCUBE_APODIZATION_DEFAULT = -1.0
+    HYPERCUBE_NORMALIZATION_ALL = 0x03
 
     def __init__(self, dll_path=None):
         self.dll_path = dll_path or self.default_dll_path()
@@ -278,6 +280,21 @@ class HeraController:
         )
         self.HeraAPI_SetSpectralSampling = self._define_optional_function(
             "HeraAPI_SetSpectralSampling",
+            ctypes.c_int,
+            [ctypes.c_int],
+        )
+        self.HeraAPI_SetHyperCubeSpectralSampling = self._define_optional_function(
+            "HeraAPI_SetHyperCubeSpectralSampling",
+            ctypes.c_int,
+            [ctypes.c_int],
+        )
+        self.HeraAPI_SetHyperCubeApodization = self._define_optional_function(
+            "HeraAPI_SetHyperCubeApodization",
+            ctypes.c_int,
+            [ctypes.c_double],
+        )
+        self.HeraAPI_SetHyperCubeNormalizationMode = self._define_optional_function(
+            "HeraAPI_SetHyperCubeNormalizationMode",
             ctypes.c_int,
             [ctypes.c_int],
         )
@@ -669,11 +686,30 @@ class HeraController:
         return bands.value
 
     def set_spectral_sampling(self, sampling):
-        if not self.HeraAPI_SetSpectralSampling:
+        setter = self.HeraAPI_SetHyperCubeSpectralSampling or self.HeraAPI_SetSpectralSampling
+        if not setter:
             return False
         self.check_status(
-            self.HeraAPI_SetSpectralSampling(ctypes.c_int(int(sampling))),
-            "Set spectral sampling",
+            setter(ctypes.c_int(int(sampling))),
+            "Set HyperCube spectral sampling",
+        )
+        return True
+
+    def set_hypercube_apodization(self, sigma=HYPERCUBE_APODIZATION_DEFAULT):
+        if not self.HeraAPI_SetHyperCubeApodization:
+            return False
+        self.check_status(
+            self.HeraAPI_SetHyperCubeApodization(ctypes.c_double(float(sigma))),
+            "Set HyperCube apodization",
+        )
+        return True
+
+    def set_hypercube_normalization_mode(self, mode=HYPERCUBE_NORMALIZATION_ALL):
+        if not self.HeraAPI_SetHyperCubeNormalizationMode:
+            return False
+        self.check_status(
+            self.HeraAPI_SetHyperCubeNormalizationMode(ctypes.c_int(int(mode))),
+            "Set HyperCube normalization mode",
         )
         return True
 
