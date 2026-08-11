@@ -27,6 +27,7 @@ C:\Program Files\Micro-Manager-2.0\NikonTi_Z.cfg
 ```
 
 This config should contain only the Ti scope/Z drive, without lamp or shutter devices.
+Z connects automatically during app startup after the HERA and Tango connection attempts. The Z connection button remains available for manual disconnect or recovery.
 
 ## Run
 
@@ -74,7 +75,7 @@ Important mixins:
 4. Set camera `Parameters`: gain, exposure, and `16-bit HDR`.
 5. Set `Control Bar` options: spectral mode, sampling, bands, averaging, binning, and data type.
 6. Select ROI, or clear ROI for full-frame workflow.
-7. If using Z, click `Connect Z`, focus each site, then `Add New` or `Update` in `Saved Sites`.
+7. If using Z, confirm `Live Z` after automatic connection, focus each site, then `Add New` or `Update` in `Saved Sites`.
 8. Choose export folder/name/stamp and selected products: `_raw`, `_ref`, `_nrm`.
 9. Run `Start Single Acquisition`, `Run One Loop`, or `Run Timelapse`.
 
@@ -98,6 +99,12 @@ With Hera SDK 1.5.2 or newer, the app uses the current HyperCube spectral-sampli
 ## Stage, Saved Sites, And Z
 
 `Saved Sites` stores site number, name, XY, active ROI, and Z when Micro-Manager Z is connected. If Z is unavailable, a dummy `0.000` placeholder is stored and is not treated as a real focus target.
+
+Use `Export` to save the complete Saved Sites table as CSV and `Import` to restore it. The CSV preserves XY, Z, real-Z state, and per-site ROI, allowing large wafer layouts to survive an app restart and be reviewed outside the app.
+
+`Wafer Grid` generates the centered 52-chip layout `4/6/8/8/8/8/6/4`. Align the same chip landmark for `R4-C4`, `R4-C5`, and `R5-C4` with the Live View cross and capture their stage coordinates; the app derives the rotated row/column vectors, applies the configured landmark-to-center XY offset, replaces Saved Sites, and orders the generated sites in a serpentine scan. The current ROI and Z are copied to every generated site.
+
+Enabling `Cross` places it at the center pixel of the current live image. Click within Live View to pin it elsewhere, or use `Center` to restore the current full-frame/ROI image center.
 
 Saved Z movement is always enabled for `Run One Loop` and `Run Timelapse`:
 

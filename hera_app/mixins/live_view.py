@@ -121,7 +121,7 @@ class LiveViewMixin:
             self.last_live_render_time = 0.0
         self.live_photo = None
         self.live_cross_point = None
-        self.live_profile_status_var.set("Cross: click to pin" if self.live_cross_enabled_var.get() else "Cross: center")
+        self.live_profile_status_var.set("Cross: waiting for frame" if self.live_cross_enabled_var.get() else "Cross: off")
         self.live_cursor_var.set(self._live_cursor_status_text("-"))
         self.live_first_frame_rendered = False
         self.live_auth_warning_logged = False
@@ -926,8 +926,39 @@ class LiveViewMixin:
         self._render_live_profiles()
 
     def toggle_live_cross(self):
-        if not self.live_cross_enabled_var.get():
+        if self.live_cross_enabled_var.get():
+            self.reset_live_cross_center()
+        else:
             self.live_cross_point = None
+            self.live_profile_status_var.set("Cross: off")
+            self._schedule_live_render(force=True)
+            self._render_live_profiles()
+
+    def _set_live_cross_to_frame_center(self, frame_size=None, crop_offset=None):
+        if frame_size is None:
+            with self.live_frame_lock:
+                frame_size = self.live_display_frame_size
+        if not frame_size:
+            self.live_cross_point = None
+            self.live_profile_status_var.set("Cross: waiting for frame")
+            return False
+        frame_width, frame_height = frame_size
+        if frame_width <= 0 or frame_height <= 0:
+            self.live_cross_point = None
+            self.live_profile_status_var.set("Cross: waiting for frame")
+            return False
+        offset_x, offset_y = crop_offset if crop_offset is not None else self._live_crop_offset
+        self.live_cross_point = (
+            int(offset_x) + (int(frame_width) // 2),
+            int(offset_y) + (int(frame_height) // 2),
+        )
+        self.live_profile_status_var.set("Cross: center")
+        return True
+
+    def reset_live_cross_center(self):
+        if not self.live_cross_enabled_var.get():
+            self.live_cross_enabled_var.set(True)
+        self._set_live_cross_to_frame_center()
         self._schedule_live_render(force=True)
         self._render_live_profiles()
 
@@ -1135,6 +1166,11 @@ class LiveViewMixin:
         with self.live_frame_lock:
             self.live_display_rect = (left, top, out_w, out_h)
             self.live_display_frame_size = (frame_width, frame_height)
+        if self.live_cross_enabled_var.get() and not self.live_cross_point:
+            self._set_live_cross_to_frame_center(
+                frame_size=(frame_width, frame_height),
+                crop_offset=self._live_crop_offset,
+            )
         if full_frame_info:
             self._maybe_initialize_roi_fields_from_live_frame(full_frame_info[0], full_frame_info[1])
         else:

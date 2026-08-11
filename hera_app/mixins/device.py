@@ -27,6 +27,12 @@ class DeviceMixin:
         except Exception as exc:
             self.log(f"Tango auto-connect skipped: {exc}")
 
+        try:
+            self.log("Starting Micro-Manager Z auto-connect...")
+            self.connect_micro_z_async()
+        except Exception as exc:
+            self.log(f"Micro-Manager Z auto-connect skipped: {exc}")
+
     def refresh_device_list(self):
         try:
             controller = HeraController(dll_path=self.dll_path_var.get())

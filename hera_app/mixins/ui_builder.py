@@ -518,6 +518,9 @@ class UIBuilderMixin:
         saved_actions.pack(fill="x", pady=(4, 0))
         tk.Button(saved_actions, text="\U0001F5D1", command=self.delete_selected_position, width=4).pack(side="left", padx=(0, 4))
         tk.Button(saved_actions, text="Go To", command=self.goto_selected_position, width=8).pack(side="left")
+        tk.Button(saved_actions, text="Wafer Grid", command=self.open_wafer_grid_dialog, width=10).pack(side="right")
+        tk.Button(saved_actions, text="Export", command=self.export_saved_sites_csv, width=7).pack(side="right", padx=(0, 4))
+        tk.Button(saved_actions, text="Import", command=self.import_saved_sites_csv, width=7).pack(side="right", padx=(0, 4))
 
         position_panel = tk.Frame(stage_tab)
         position_panel.pack(fill="x", pady=(0, 6))
@@ -647,6 +650,8 @@ class UIBuilderMixin:
                        command=self.toggle_live_cross,
                        bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
                        activebackground=self.theme["panel"], font=compact_font, padx=0, pady=0).pack(side="left", padx=(2, 0))
+        tk.Button(live_display_bar, text="Center", command=self.reset_live_cross_center,
+                  font=compact_font, padx=3, pady=0).pack(side="left", padx=(2, 0))
         tk.Label(live_display_bar, textvariable=self.live_profile_status_var, fg="#9aa6b2", bg=self.theme["panel"], font=compact_font).pack(side="left", padx=(4, 2))
         tk.Label(live_display_bar, textvariable=self.live_gamma_label_var, fg="#9aa6b2", bg=self.theme["panel"], font=compact_font).pack(side="left", padx=(4, 2))
         tk.Scale(live_display_bar, variable=self.live_gamma_var, from_=0.2, to=3.0, resolution=0.1,
@@ -1204,6 +1209,7 @@ class UIBuilderMixin:
                        command=self.toggle_live_cross,
                        bg=self.theme["panel"], fg=self.theme["text"], selectcolor=self.theme["field"],
                        activebackground=self.theme["panel"]).pack(side="left", padx=(8, 0))
+        tk.Button(live_display_bar, text="Reset Center", command=self.reset_live_cross_center).pack(side="left", padx=(6, 0))
         tk.Label(live_display_bar, textvariable=self.live_profile_status_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(10, 4))
         tk.Label(live_display_bar, textvariable=self.live_gamma_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(10, 4))
         tk.Scale(live_display_bar, variable=self.live_gamma_var, from_=0.2, to=3.0, resolution=0.1,
