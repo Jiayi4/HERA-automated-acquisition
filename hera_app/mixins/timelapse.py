@@ -15,6 +15,49 @@ class TimelapseMixin:
         self.timelapse_run_id += 1
         return self.timelapse_run_id
 
+    def _ensure_timelapse_interval_state(self):
+        if not hasattr(self, "timelapse_interval_lock"):
+            self.timelapse_interval_lock = threading.Lock()
+            self.timelapse_interval_minutes = 10.0
+            self.timelapse_interval_revision = 0
+
+    def _get_timelapse_interval(self):
+        self._ensure_timelapse_interval_state()
+        with self.timelapse_interval_lock:
+            return self.timelapse_interval_minutes, self.timelapse_interval_revision
+
+    def _store_timelapse_interval(self, interval_min):
+        self._ensure_timelapse_interval_state()
+        with self.timelapse_interval_lock:
+            previous = self.timelapse_interval_minutes
+            changed = not math.isclose(previous, interval_min, rel_tol=0.0, abs_tol=1e-12)
+            self.timelapse_interval_minutes = interval_min
+            if changed:
+                self.timelapse_interval_revision += 1
+            return previous, changed
+
+    def on_timelapse_interval_changed(self):
+        current_interval, _revision = self._get_timelapse_interval()
+        try:
+            interval_min = float(self.interval_var.get())
+        except Exception:
+            self.interval_var.set(current_interval)
+            self.log("Interval must be a number; the previous value was restored.")
+            return
+        if not math.isfinite(interval_min) or interval_min < 0:
+            self.interval_var.set(current_interval)
+            self.log("Interval must be a finite number that is zero or greater; the previous value was restored.")
+            return
+
+        previous, changed = self._store_timelapse_interval(interval_min)
+        if not changed or not (self.timelapse_thread and self.timelapse_thread.is_alive()):
+            return
+        if self.next_loop_deadline is None:
+            timing = "the new interval will apply after the current loop completes"
+        else:
+            timing = "the active next-loop countdown will be recalculated"
+        self.log(f"Timelapse interval changed from {previous:g} to {interval_min:g} min; {timing}.")
+
     def _roi_plan_message(self, label, positions):
         positions = list(positions)
         saved_count = sum(1 for position in positions if self._get_position_roi(position))
@@ -152,10 +195,15 @@ class TimelapseMixin:
             self.log("Add at least one stage position before starting timelapse.")
             return
 
-        interval_min = float(self.interval_var.get())
-        if interval_min < 0:
-            self.log("Interval must be zero or greater.")
+        try:
+            interval_min = float(self.interval_var.get())
+        except Exception:
+            self.log("Interval must be a number.")
             return
+        if not math.isfinite(interval_min) or interval_min < 0:
+            self.log("Interval must be a finite number that is zero or greater.")
+            return
+        self._store_timelapse_interval(interval_min)
         if not self._validate_auto_save_export_options():
             return
         if not self._validate_timelapse_z_plan(timelapse_positions):
@@ -303,7 +351,6 @@ class TimelapseMixin:
         if run_id is None:
             run_id = self.timelapse_run_id
         cycle = 0
-        interval_min = float(self.interval_var.get())
         positions = list(positions_override) if positions_override is not None else list(self.positions)
         try:
             while not self.timelapse_stop_event.is_set():
@@ -334,23 +381,37 @@ class TimelapseMixin:
                     self._log_async("Reached requested stop time.")
                     break
 
+                loop_completed_at = datetime.now()
+                interval_min, interval_revision = self._get_timelapse_interval()
                 if interval_min <= 0:
                     self.next_loop_deadline = None
                     self._set_var_async(self.next_loop_remaining_var, "00:00")
                     self._log_async(f"Cycle {cycle} complete. Interval is 0; starting next cycle immediately.")
                 else:
-                    next_cycle_time = datetime.now() + timedelta(minutes=interval_min)
+                    next_cycle_time = loop_completed_at + timedelta(minutes=interval_min)
                     self.next_loop_deadline = next_cycle_time
                     self._start_live_view_for_interval()
                     self._log_async(
                         f"Cycle {cycle} complete. Waiting {interval_min:.2f} minutes from loop completion before next cycle."
                     )
-                    while datetime.now() < next_cycle_time:
+                    while True:
                         if self.timelapse_stop_event.is_set():
                             break
                         self._wait_while_paused()
                         if self.timelapse_stop_at and datetime.now() >= self.timelapse_stop_at:
                             self.timelapse_stop_event.set()
+                            break
+                        updated_interval, updated_revision = self._get_timelapse_interval()
+                        if updated_revision != interval_revision:
+                            interval_min = updated_interval
+                            interval_revision = updated_revision
+                            next_cycle_time = loop_completed_at + timedelta(minutes=interval_min)
+                            self.next_loop_deadline = next_cycle_time if interval_min > 0 else None
+                            self._log_async(
+                                f"Active interval updated to {interval_min:.2f} minutes; "
+                                "next cycle time recalculated from the previous loop completion."
+                            )
+                        if interval_min <= 0 or datetime.now() >= next_cycle_time:
                             break
                         time.sleep(0.25)
                     self.next_loop_deadline = None
