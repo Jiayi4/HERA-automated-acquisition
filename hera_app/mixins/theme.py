@@ -246,6 +246,8 @@ class ThemeMixin:
         return self.theme["panel"]
 
     def _button_role(self, widget):
+        if bool(getattr(widget, "_hera_neutral_button", False)):
+            return "neutral"
         try:
             text = widget.cget("text")
         except Exception:

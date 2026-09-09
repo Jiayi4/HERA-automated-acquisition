@@ -519,7 +519,9 @@ class UIBuilderMixin:
         tk.Button(saved_actions, text="\U0001F5D1", command=self.delete_selected_position, width=4).pack(side="left", padx=(0, 4))
         tk.Button(saved_actions, text="Go To", command=self.goto_selected_position, width=8).pack(side="left")
         tk.Button(saved_actions, text="Wafer Grid", command=self.open_wafer_grid_dialog, width=10).pack(side="right")
-        tk.Button(saved_actions, text="Export", command=self.export_saved_sites_csv, width=7).pack(side="right", padx=(0, 4))
+        sites_export_button = tk.Button(saved_actions, text="Export", command=self.export_saved_sites_csv, width=7)
+        sites_export_button._hera_neutral_button = True
+        sites_export_button.pack(side="right", padx=(0, 4))
         tk.Button(saved_actions, text="Import", command=self.import_saved_sites_csv, width=7).pack(side="right", padx=(0, 4))
 
         position_panel = tk.Frame(stage_tab)

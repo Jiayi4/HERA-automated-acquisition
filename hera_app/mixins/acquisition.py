@@ -754,11 +754,36 @@ class AcquisitionMixin:
         if trigger_mode_name != "Internal":
             return False, "helper acquisition currently supports Internal trigger only"
         if not apply_roi or not self.acquisition_requested_roi:
+            direct_save, _flatfield_payload, direct_save_reason = self._helper_direct_save_plan(
+                acquisition_role,
+                auto_save,
+            )
+            if direct_save:
+                return True, ""
+            if direct_save_reason:
+                return False, direct_save_reason
             return False, "helper acquisition currently requires an active camera ROI"
         blocking_reason = self._helper_blocking_sdk_cube_reason()
         if blocking_reason:
             return False, blocking_reason
         return True, ""
+
+    def _helper_direct_save_plan(self, acquisition_role, auto_save):
+        if not (auto_save and acquisition_role == "sample" and self._timelapse_thread_active()):
+            return False, None, ""
+
+        export_ref = self._bool_var_value("export_flatfield_var", True)
+        export_nrm = self._bool_var_value("export_normalized_var", True)
+        if export_ref or export_nrm:
+            flatfield_payload = self._helper_file_backed_flatfield_payload()
+            if not flatfield_payload:
+                return (
+                    False,
+                    None,
+                    "helper full-frame direct-save requires a file-backed compatible flatfield when _ref/_nrm is selected",
+                )
+            return True, flatfield_payload, ""
+        return True, None, ""
 
     def _build_helper_request(self, export_tag, acquisition_role, scan_mode, trigger_mode, averages, stabilization):
         request_id = f"{acquisition_role}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -766,17 +791,12 @@ class AcquisitionMixin:
         export_raw = self._bool_var_value("export_raw_var", True)
         export_ref = self._bool_var_value("export_flatfield_var", True)
         export_nrm = self._bool_var_value("export_normalized_var", True)
-        direct_save = bool(auto_save and acquisition_role == "sample" and self._timelapse_thread_active())
-        flatfield_payload = None
-        if direct_save and (export_ref or export_nrm):
-            flatfield_payload = self._helper_file_backed_flatfield_payload()
-            if not flatfield_payload:
-                direct_save = False
-                self.log(
-                    "Helper direct-save skipped because the loaded flatfield is not file-backed; "
-                    "falling back to helper cache plus app export.",
-                    detail=True,
-                )
+        direct_save, flatfield_payload, direct_save_reason = self._helper_direct_save_plan(
+            acquisition_role,
+            auto_save,
+        )
+        if direct_save_reason:
+            self.log(f"Helper direct-save skipped: {direct_save_reason}.", detail=True)
         return {
             "request_id": request_id,
             "role": acquisition_role,
@@ -818,6 +838,49 @@ class AcquisitionMixin:
             "data_type": int(self.DATA_TYPES[self.param_vars["data_type"].get()]),
             "callback_timeout_sec": int(getattr(self, "helper_acquisition_timeout_sec", 900)),
         }
+
+    def _log_large_acquisition_notice(self, scan_mode_name, scan_mode, apply_roi):
+        try:
+            bands = int(self.param_vars["bands"].get())
+        except Exception:
+            bands = 0
+        if bands <= 0 and self.controller:
+            try:
+                bands = int(self.controller.get_default_output_bands(scan_mode))
+            except Exception:
+                bands = 0
+
+        if apply_roi and self.acquisition_requested_roi:
+            _x, _y, width, height = self.acquisition_requested_roi
+            scope = f"ROI {width}x{height}"
+        else:
+            width = height = 0
+            if self.controller and self.controller.connected:
+                try:
+                    _x, _y, width, height = self.controller.get_roi()
+                except Exception:
+                    width = height = 0
+            scope = f"full frame {width}x{height}" if width and height else "full frame"
+
+        data_type_name = self.param_vars["data_type"].get()
+        bytes_per_value = 8 if self.DATA_TYPES.get(data_type_name, 0) == 1 else 4
+        estimated_bytes = int(width) * int(height) * max(0, int(bands)) * bytes_per_value
+        is_large = estimated_bytes >= 1024 ** 3
+        if scan_mode_name == "Low" and not is_large:
+            return
+
+        size_text = self._format_bytes_for_log(estimated_bytes) if estimated_bytes else "unknown size"
+        self.log(
+            f"{scan_mode_name} acquisition requested for {scope}, bands={bands or 'SDK default'}, "
+            f"data={data_type_name} ({size_text} hypercube estimate). "
+            "The SDK may stay at 0% until the acquisition callback arrives; wait for the callback before pressing Abort.",
+            detail=True,
+        )
+
+    def _acquisition_wait_progress_text(self, acquisition_role, scan_mode_name, apply_roi):
+        role_text = "flatfield" if acquisition_role == "flatfield" else "acquisition"
+        scope = "ROI" if apply_roi and self.acquisition_requested_roi else "full frame"
+        return f"Acquiring {role_text}: {scan_mode_name}, {scope}; waiting for SDK callback..."
 
     def _write_helper_request(self, request):
         request_path = os.path.join(self._helper_request_dir(), f"{request['request_id']}.json")
@@ -1456,6 +1519,7 @@ class AcquisitionMixin:
         apply_elapsed = time.perf_counter() - apply_start_time
         self.log(f"Performance timing: camera parameter apply took {apply_elapsed:.2f} s.", detail=True)
         self.acquisition_camera_roi = self._normalize_roi_tuple(self.last_applied_roi) if apply_roi and self.last_applied_roi else None
+        self._log_large_acquisition_notice(scan_mode_name, scan_mode, apply_roi)
         if self.acquisition_requested_roi:
             try:
                 self.log(f"Camera ROI after parameter apply: {self.controller.get_roi()}")
@@ -1509,10 +1573,11 @@ class AcquisitionMixin:
         if trigger_mode_name == "Internal":
             if acquisition_role == "flatfield":
                 self.log("Sending software flatfield acquisition command through Hera SDK.")
-                self._start_busy_progress("Acquiring flatfield...")
             else:
                 self.log("Sending software acquisition command through Hera SDK.")
-                self._set_run_progress("Acquiring: 0%", 0, mode="determinate")
+            self._start_busy_progress(
+                self._acquisition_wait_progress_text(acquisition_role, scan_mode_name, apply_roi)
+            )
         else:
             self.log(f"Arming Hera SDK acquisition with trigger mode '{trigger_mode_name}'.")
             self._set_run_progress("Waiting for trigger...", 0, mode="determinate")
@@ -1874,6 +1939,11 @@ class AcquisitionMixin:
                 self.start_live_view()
         except Exception as exc:
             self.log(f"Failed to abort acquisition: {exc}")
+            self.log(
+                "Abort did not clear the Hera SDK acquisition state. "
+                "Close this app before trying again; if Live View still reports HyperCube acquisition in progress after restart, "
+                "power-cycle the Hera camera/controller."
+            )
             self._fail_run_progress("Progress: abort failed")
             self.update_state("Error")
 
