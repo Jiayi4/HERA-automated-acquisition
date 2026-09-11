@@ -1,4 +1,5 @@
 import csv
+import errno
 import math
 import os
 import threading
@@ -525,10 +526,66 @@ class TimelapseMixin:
             pass
         return "", ""
 
+    def _is_disk_full_error(self, exc):
+        disk_full_errnos = {errno.ENOSPC}
+        quota_errno = getattr(errno, "EDQUOT", None)
+        if quota_errno is not None:
+            disk_full_errnos.add(quota_errno)
+        disk_full_winerrors = {39, 112}
+        message_markers = (
+            "no space left on device",
+            "not enough space on the disk",
+            "not enough free disk space",
+            "insufficient disk space",
+            "disk is full",
+            "disk full",
+            "disk quota exceeded",
+            "quota exceeded",
+            "[errno 28]",
+            "[winerror 39]",
+            "[winerror 112]",
+        )
+
+        pending = [exc]
+        seen = set()
+        messages = []
+        while pending:
+            current = pending.pop()
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            messages.append(str(current).lower())
+            if isinstance(current, OSError):
+                if getattr(current, "errno", None) in disk_full_errnos:
+                    return True
+                if getattr(current, "winerror", None) in disk_full_winerrors:
+                    return True
+            pending.extend((getattr(current, "__cause__", None), getattr(current, "__context__", None)))
+        combined_message = " ".join(messages)
+        return any(marker in combined_message for marker in message_markers)
+
+    def _pause_timelapse_for_disk_full(self, position, cycle_index, error_text):
+        self.timelapse_pause_event.set()
+
+        def update_pause_ui():
+            if self.timelapse_stop_event.is_set():
+                return
+            self.pause_button.config(text="Resume")
+            self.timelapse_status_var.set("Timelapse: paused")
+            self.update_state("Paused")
+
+        self._safe_after(0, update_pause_ui)
+        self._set_run_progress("Paused: free disk space, then Resume", 0, mode="determinate")
+        self._log_async(
+            f"Cycle {cycle_index}: saving {position.name} failed because the output disk is full: {error_text}. "
+            "Timelapse paused; this sample was not skipped. Free disk space, then press Resume to retry the same site."
+        )
+
     def _run_site_with_retries(self, position, cycle_index):
         attempts = self._timelapse_site_retry_count() + 1
         last_error = ""
-        for attempt in range(1, attempts + 1):
+        attempt = 1
+        while attempt <= attempts:
             if self.timelapse_stop_event.is_set():
                 raise TimelapseStopped("Timelapse stopped before site acquisition.")
             try:
@@ -563,10 +620,20 @@ class TimelapseMixin:
                 raise
             except Exception as exc:
                 last_error = str(exc)
+                if self._is_disk_full_error(exc):
+                    self._pause_timelapse_for_disk_full(position, cycle_index, last_error)
+                    self._wait_while_paused()
+                    if self.timelapse_stop_event.is_set():
+                        raise TimelapseStopped("Timelapse stopped while paused for full output disk.")
+                    self._log_async(
+                        f"Cycle {cycle_index}: resumed after disk-full pause; retrying {position.name} without skipping it."
+                    )
+                    continue
                 self._log_async(f"Cycle {cycle_index}: {position.name} attempt {attempt}/{attempts} failed: {last_error}")
                 self._safe_after(0, lambda: self.update_state("RunningTimelapse"))
                 if attempt < attempts and not self.timelapse_stop_event.is_set():
                     time.sleep(2.0)
+                attempt += 1
 
         x, y = self._current_stage_xy_strings()
         self._record_trigger_log_entry(
