@@ -37,6 +37,27 @@ class TimelapseMixin:
                 self.timelapse_interval_revision += 1
             return previous, changed
 
+    def _ensure_timelapse_sites_state(self):
+        if not hasattr(self, "timelapse_sites_lock"):
+            self.timelapse_sites_lock = threading.Lock()
+            self.timelapse_selected_positions = tuple()
+            self.timelapse_sites_text = "all"
+
+    def _get_timelapse_sites(self):
+        self._ensure_timelapse_sites_state()
+        with self.timelapse_sites_lock:
+            return list(self.timelapse_selected_positions), self.timelapse_sites_text
+
+    def _store_timelapse_sites(self, positions, selection_text):
+        self._ensure_timelapse_sites_state()
+        with self.timelapse_sites_lock:
+            previous_positions = self.timelapse_selected_positions
+            previous_text = self.timelapse_sites_text
+            updated_positions = tuple(positions)
+            self.timelapse_selected_positions = updated_positions
+            self.timelapse_sites_text = selection_text
+            return list(previous_positions), previous_text, previous_positions != updated_positions
+
     def on_timelapse_interval_changed(self):
         current_interval, _revision = self._get_timelapse_interval()
         try:
@@ -59,6 +80,35 @@ class TimelapseMixin:
             timing = "the active next-loop countdown will be recalculated"
         self.log(f"Timelapse interval changed from {previous:g} to {interval_min:g} min; {timing}.")
 
+    def on_timelapse_sites_changed(self):
+        _previous_positions, previous_text = self._get_timelapse_sites()
+        selection_text = self._timelapse_site_selection_text()
+        try:
+            positions = self._timelapse_selected_positions()
+        except Exception as exc:
+            self.timelapse_sites_var.set(previous_text)
+            self.log(f"Invalid timelapse site selection; the previous value was restored: {exc}")
+            return
+        if not positions:
+            self.timelapse_sites_var.set(previous_text)
+            self.log("Add at least one stage position before selecting timelapse sites.")
+            return
+
+        timelapse_running = bool(self.timelapse_thread and self.timelapse_thread.is_alive())
+        if timelapse_running and not self._validate_timelapse_z_plan(positions):
+            self.timelapse_sites_var.set(previous_text)
+            self.log("The previous timelapse site selection was restored.")
+            return
+
+        _old_positions, _old_text, changed = self._store_timelapse_sites(positions, selection_text or "all")
+        if not changed or not timelapse_running:
+            return
+        site_label = self._timelapse_site_selection_label(positions)
+        self.log(
+            f"Timelapse sites changed to {site_label}; "
+            "the new selection will apply to the next cycle that has not started."
+        )
+
     def _roi_plan_message(self, label, positions):
         positions = list(positions)
         saved_count = sum(1 for position in positions if self._get_position_roi(position))
@@ -79,7 +129,9 @@ class TimelapseMixin:
         sites_var = getattr(self, "timelapse_sites_var", None)
         if sites_var is not None:
             sites_var.set("all")
-        self.log("Timelapse site selection set to all sites.")
+        self.on_timelapse_sites_changed()
+        if not (self.timelapse_thread and self.timelapse_thread.is_alive()):
+            self.log("Timelapse site selection set to all sites.")
 
     def _timelapse_site_selection_text(self):
         sites_var = getattr(self, "timelapse_sites_var", None)
@@ -205,6 +257,7 @@ class TimelapseMixin:
             self.log("Interval must be a finite number that is zero or greater.")
             return
         self._store_timelapse_interval(interval_min)
+        self._store_timelapse_sites(timelapse_positions, self._timelapse_site_selection_text() or "all")
         if not self._validate_auto_save_export_options():
             return
         if not self._validate_timelapse_z_plan(timelapse_positions):
@@ -225,7 +278,7 @@ class TimelapseMixin:
         self.update_state("RunningTimelapse")
 
         run_id = self._begin_timelapse_run()
-        self.timelapse_thread = threading.Thread(target=self._timelapse_worker, args=(False, timelapse_positions, run_id), daemon=True)
+        self.timelapse_thread = threading.Thread(target=self._timelapse_worker, args=(False, None, run_id), daemon=True)
         self.timelapse_thread.start()
         site_label = self._timelapse_site_selection_label(timelapse_positions)
         self.log(self._roi_plan_message(f"Timelapse started for site(s): {site_label}", timelapse_positions))
@@ -352,7 +405,7 @@ class TimelapseMixin:
         if run_id is None:
             run_id = self.timelapse_run_id
         cycle = 0
-        positions = list(positions_override) if positions_override is not None else list(self.positions)
+        fixed_positions = list(positions_override) if positions_override is not None else None
         try:
             while not self.timelapse_stop_event.is_set():
                 if self.timelapse_stop_at and datetime.now() >= self.timelapse_stop_at:
@@ -360,10 +413,15 @@ class TimelapseMixin:
                     break
 
                 cycle += 1
+                if single_cycle:
+                    positions = fixed_positions if fixed_positions is not None else list(self.positions)
+                else:
+                    positions, _selection_text = self._get_timelapse_sites()
                 self.next_loop_deadline = None
                 self._set_var_async(self.next_loop_remaining_var, "-")
                 self._set_var_async(self.current_cycle_var, str(cycle))
-                self._log_async(f"Cycle {cycle} started.")
+                site_label = self._timelapse_site_selection_label(positions)
+                self._log_async(f"Cycle {cycle} started for site(s): {site_label}.")
                 for position in positions:
                     if self.timelapse_stop_event.is_set():
                         break

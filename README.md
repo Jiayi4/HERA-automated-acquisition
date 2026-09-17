@@ -116,7 +116,7 @@ Saved Z movement is always enabled for `Run One Loop` and `Run Timelapse`:
 
 `Go To` also moves to the saved Z when a real saved Z exists and Z is connected.
 
-The timelapse `Sites` field accepts `all`, comma-separated site numbers, and ranges such as `1-5`.
+The timelapse `Sites` field accepts `all`, comma-separated site numbers, and ranges such as `1-5`. While a timelapse is running, press Enter or leave the field after editing it; the valid new selection is applied when the next cycle starts, without changing the current cycle.
 
 ## Acquisition And Timelapse
 

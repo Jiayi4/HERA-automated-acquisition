@@ -214,6 +214,8 @@ class UIBuilderMixin:
             return self.apply_stage_motion_settings
         if self._var_matches(var_name, getattr(self, "interval_var", None)):
             return self.on_timelapse_interval_changed
+        if self._var_matches(var_name, getattr(self, "timelapse_sites_var", None)):
+            return self.on_timelapse_sites_changed
         if self._var_matches(var_name, getattr(self, "xy_target_x_var", None), getattr(self, "xy_target_y_var", None)):
             if for_focusout:
                 return None
