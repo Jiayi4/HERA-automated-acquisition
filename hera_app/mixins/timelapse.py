@@ -197,12 +197,12 @@ class TimelapseMixin:
                     break
         return ", ".join(site_numbers) if site_numbers else "none"
 
-    def run_one_cycle(self):
+    def run_one_cycle(self, positions_override=None):
         if self.timelapse_thread and self.timelapse_thread.is_alive():
             self.log("Timelapse is already running.")
             return
         try:
-            cycle_positions = self._timelapse_selected_positions()
+            cycle_positions = list(positions_override) if positions_override is not None else self._timelapse_selected_positions()
         except Exception as exc:
             self.log(f"Choose valid site numbers before running one loop: {exc}")
             return

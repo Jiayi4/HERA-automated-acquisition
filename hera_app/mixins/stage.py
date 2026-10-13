@@ -10,6 +10,16 @@ from hera_app.controllers import SavedPosition
 
 class StageMixin:
     WAFER_GRID_ROW_COUNTS = (4, 6, 8, 8, 8, 8, 6, 4)
+    DUAL_DIE_ROW_COUNTS = (3, 5, 7, 5, 3)
+    DUAL_DIE_CARRIER_WIDTH_MM = 14.9
+    DUAL_DIE_CARRIER_HEIGHT_MM = 16.0
+    DUAL_DIE_WIDTH_MM = 10.0
+    DUAL_DIE_HEIGHT_MM = 6.5
+    DUAL_DIE_CENTER_Y_MM = {"U": 2.5, "L": -4.5}
+    WELL_MESH_ROWS = 7
+    WELL_MESH_COLUMNS = 9
+    WELL_MESH_PITCH_MM = 0.300
+    WELL_MESH_DEFAULT_Y_OFFSET_MM = -0.018
 
     def apply_stage_motion_settings(self):
         if not self.tango or not self.tango.connected:
@@ -546,6 +556,521 @@ class StageMixin:
         except Exception as exc:
             self.log(f"Failed to generate wafer grid: {exc}")
             messagebox.showerror("Wafer Grid", str(exc), parent=getattr(self, "wafer_grid_dialog", self))
+
+    def open_dual_die_grid_dialog(self):
+        existing = getattr(self, "dual_die_grid_dialog", None)
+        try:
+            if existing and existing.winfo_exists():
+                existing.lift()
+                existing.focus_force()
+                return
+        except Exception:
+            pass
+
+        dialog = tk.Toplevel(self)
+        self.dual_die_grid_dialog = dialog
+        dialog.title("Dual-Die Wafer Grid")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_dual_die_grid_dialog)
+
+        body = tk.Frame(dialog, padx=10, pady=10)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Align each carrier top-left corner with the Live View cross.").grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 7)
+        )
+        tk.Label(body, text="Point", font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="w")
+        tk.Label(body, text="X", font=("Segoe UI", 9, "bold")).grid(row=1, column=1, sticky="w")
+        tk.Label(body, text="Y", font=("Segoe UI", 9, "bold")).grid(row=1, column=2, sticky="w")
+
+        self.dual_die_grid_calibration_vars = {}
+        calibration_points = (
+            ("R3-C4", "Center carrier"),
+            ("R3-C5", "Right neighbor"),
+            ("R4-C3", "Lower neighbor"),
+        )
+        for row_index, (point_name, description) in enumerate(calibration_points, start=2):
+            x_var = tk.StringVar(value="")
+            y_var = tk.StringVar(value="")
+            self.dual_die_grid_calibration_vars[point_name] = (x_var, y_var)
+            point_frame = tk.Frame(body)
+            point_frame.grid(row=row_index, column=0, sticky="w", pady=2)
+            tk.Label(point_frame, text=point_name, width=7, anchor="w").pack(side="left")
+            tk.Label(point_frame, text=description, fg=self.theme["muted"]).pack(side="left")
+            tk.Entry(body, textvariable=x_var, width=12).grid(row=row_index, column=1, padx=(6, 5), pady=2)
+            tk.Entry(body, textvariable=y_var, width=12).grid(row=row_index, column=2, padx=(0, 7), pady=2)
+            tk.Button(
+                body,
+                text="Capture",
+                command=lambda name=point_name: self.capture_dual_die_grid_calibration_point(name),
+                width=8,
+            ).grid(row=row_index, column=3, pady=2)
+
+        details = (
+            "Layout: 3 / 5 / 7 / 5 / 3 carriers\n"
+            "Carrier: 14.9 x 16 mm | Die: 10 x 6.5 mm\n"
+            "Sampling: centered 2-1-2 points, 4 x 2 mm spacing\n"
+            "10 points per carrier, 230 total"
+        )
+        tk.Label(body, text=details, justify="left", fg=self.theme["muted"]).grid(
+            row=5, column=0, columnspan=4, sticky="w", pady=(8, 0)
+        )
+
+        actions = tk.Frame(body)
+        actions.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        tk.Button(actions, text="Generate 230 Sites", command=self.generate_dual_die_grid_sites).pack(
+            side="left", fill="x", expand=True, padx=(0, 5)
+        )
+        tk.Button(actions, text="Cancel", command=self._close_dual_die_grid_dialog, width=8).pack(side="right")
+
+        self._apply_theme_recursive(dialog)
+        dialog.update_idletasks()
+        try:
+            x = self.winfo_rootx() + max(20, (self.winfo_width() - dialog.winfo_width()) // 2)
+            y = self.winfo_rooty() + max(20, (self.winfo_height() - dialog.winfo_height()) // 3)
+            dialog.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+    def _close_dual_die_grid_dialog(self):
+        dialog = getattr(self, "dual_die_grid_dialog", None)
+        self.dual_die_grid_dialog = None
+        self.dual_die_grid_calibration_vars = {}
+        try:
+            if dialog and dialog.winfo_exists():
+                dialog.destroy()
+        except Exception:
+            pass
+
+    def capture_dual_die_grid_calibration_point(self, point_name):
+        try:
+            if not self.tango or not self.tango.connected:
+                raise RuntimeError("Connect the stage first.")
+            variables = self.dual_die_grid_calibration_vars.get(point_name)
+            if not variables:
+                raise RuntimeError(f"Unknown calibration point {point_name}.")
+            with self.stage_lock:
+                x, y, _, _ = self.tango.get_position()
+            variables[0].set(f"{x:.6f}")
+            variables[1].set(f"{y:.6f}")
+            self.log(f"Captured dual-die calibration {point_name} top-left: X={x:.6f}, Y={y:.6f}.")
+        except Exception as exc:
+            self.log(f"Failed to capture dual-die calibration point: {exc}")
+            messagebox.showerror("Dual-Die Grid", str(exc), parent=getattr(self, "dual_die_grid_dialog", self))
+
+    def _read_dual_die_grid_calibration(self):
+        points = {}
+        for point_name in ("R3-C4", "R3-C5", "R4-C3"):
+            variables = self.dual_die_grid_calibration_vars.get(point_name)
+            if not variables:
+                raise RuntimeError(f"Capture the top-left corner of {point_name} first.")
+            try:
+                x = float(variables[0].get())
+                y = float(variables[1].get())
+            except Exception as exc:
+                raise RuntimeError(f"Enter or capture valid X/Y coordinates for {point_name}.") from exc
+            if not math.isfinite(x) or not math.isfinite(y):
+                raise RuntimeError(f"Coordinates for {point_name} must be finite.")
+            points[point_name] = (x, y)
+        return points
+
+    def _dual_die_local_points_mm(self):
+        half_x_offset = 2.0
+        half_y_offset = 1.0
+        sampling_offsets = (
+            (-half_x_offset, half_y_offset),
+            (half_x_offset, half_y_offset),
+            (0.0, 0.0),
+            (-half_x_offset, -half_y_offset),
+            (half_x_offset, -half_y_offset),
+        )
+        points = {}
+        for die_name, die_center_y in self.DUAL_DIE_CENTER_Y_MM.items():
+            for point_number, (x_offset, y_offset) in enumerate(sampling_offsets, start=1):
+                x_from_left = (self.DUAL_DIE_CARRIER_WIDTH_MM / 2.0) + x_offset
+                point_y_from_center = die_center_y + y_offset
+                y_from_top = (self.DUAL_DIE_CARRIER_HEIGHT_MM / 2.0) - point_y_from_center
+                points[(die_name, point_number)] = (x_from_left, y_from_top)
+        return points
+
+    def _build_dual_die_grid_positions(self, anchor, column_vector, row_vector, z, roi, z_is_real):
+        anchor_x, anchor_y = (float(value) for value in anchor)
+        column_x, column_y = (float(value) for value in column_vector)
+        row_x, row_y = (float(value) for value in row_vector)
+        local_points = self._dual_die_local_points_mm()
+        left_to_right_path = (
+            ("U", 1), ("U", 4), ("L", 1), ("L", 4),
+            ("L", 3), ("U", 3),
+            ("U", 2), ("U", 5), ("L", 2), ("L", 5),
+        )
+        generated = []
+        for row_number, column_count in enumerate(self.DUAL_DIE_ROW_COUNTS, start=1):
+            left_to_right = row_number % 2 == 1
+            columns = range(1, column_count + 1)
+            if not left_to_right:
+                columns = reversed(tuple(columns))
+            point_path = left_to_right_path if left_to_right else tuple(reversed(left_to_right_path))
+            for column_number in columns:
+                centered_column = column_number - ((column_count + 1) / 2.0)
+                carrier_x = anchor_x + (centered_column * column_x) + ((row_number - 3) * row_x)
+                carrier_y = anchor_y + (centered_column * column_y) + ((row_number - 3) * row_y)
+                for die_name, point_number in point_path:
+                    local_x_mm, local_y_mm = local_points[(die_name, point_number)]
+                    column_fraction = local_x_mm / self.DUAL_DIE_CARRIER_WIDTH_MM
+                    row_fraction = local_y_mm / self.DUAL_DIE_CARRIER_HEIGHT_MM
+                    x = carrier_x + (column_fraction * column_x) + (row_fraction * row_x)
+                    y = carrier_y + (column_fraction * column_y) + (row_fraction * row_y)
+                    generated.append(
+                        SavedPosition(
+                            f"R{row_number:02d}-C{column_number:02d}-{die_name}-P{point_number}",
+                            x,
+                            y,
+                            z,
+                            roi,
+                            z_is_real=z_is_real,
+                        )
+                    )
+        return generated
+
+    def _validate_dual_die_grid_vectors(self, column_vector, row_vector):
+        column_pitch = math.hypot(*column_vector)
+        row_pitch = math.hypot(*row_vector)
+        determinant = (column_vector[0] * row_vector[1]) - (column_vector[1] * row_vector[0])
+        if column_pitch <= 1e-6 or row_pitch <= 1e-6:
+            raise RuntimeError("Calibration corners must be at different XY positions.")
+        if abs(determinant) <= (column_pitch * row_pitch * 0.05):
+            raise RuntimeError("The measured carrier row and column directions are nearly parallel.")
+        if not math.isclose(column_pitch, self.DUAL_DIE_CARRIER_WIDTH_MM, rel_tol=0.20):
+            raise RuntimeError(
+                f"R3-C4 to R3-C5 measures {column_pitch:.3f} mm; expected about "
+                f"{self.DUAL_DIE_CARRIER_WIDTH_MM:.1f} mm. Check that the same top-left corner was captured."
+            )
+        if not math.isclose(row_pitch, self.DUAL_DIE_CARRIER_HEIGHT_MM, rel_tol=0.20):
+            raise RuntimeError(
+                f"R3-C4 to R4-C3 measures {row_pitch:.3f} mm; expected about "
+                f"{self.DUAL_DIE_CARRIER_HEIGHT_MM:.1f} mm. Check that the same top-left corner was captured."
+            )
+        return column_pitch, row_pitch
+
+    def generate_dual_die_grid_sites(self):
+        try:
+            if getattr(self, "acquisition_inflight", False):
+                raise RuntimeError("Wait for the current acquisition to finish.")
+            if self.timelapse_thread and self.timelapse_thread.is_alive():
+                raise RuntimeError("Stop the timelapse before replacing Saved Sites.")
+            points = self._read_dual_die_grid_calibration()
+            anchor = points["R3-C4"]
+            column_vector = (
+                points["R3-C5"][0] - anchor[0],
+                points["R3-C5"][1] - anchor[1],
+            )
+            row_vector = (
+                points["R4-C3"][0] - anchor[0],
+                points["R4-C3"][1] - anchor[1],
+            )
+            column_pitch, row_pitch = self._validate_dual_die_grid_vectors(column_vector, row_vector)
+            if self.positions and not messagebox.askyesno(
+                "Replace Saved Sites",
+                f"Replace the existing {len(self.positions)} Saved Sites with 230 dual-die sampling sites?",
+                parent=getattr(self, "dual_die_grid_dialog", self),
+            ):
+                return
+
+            z, used_dummy_z = self._get_position_save_z()
+            roi = self._capture_current_roi_for_position()
+            generated = self._build_dual_die_grid_positions(
+                anchor,
+                column_vector,
+                row_vector,
+                z,
+                roi,
+                z_is_real=not used_dummy_z,
+            )
+            if len(generated) != 230:
+                raise RuntimeError(f"Expected 230 generated sites, got {len(generated)}.")
+            if len({position.name for position in generated}) != len(generated):
+                raise RuntimeError("Generated dual-die site names are not unique.")
+            self.positions = generated
+            self.selected_position_index = 0
+            self.refresh_positions_tree()
+            if hasattr(self, "timelapse_sites_var"):
+                self.timelapse_sites_var.set("all")
+            self.log(
+                "Generated 230 dual-die sites for 23 carriers in serpentine order: "
+                f"column pitch={column_pitch:.6f} mm, row pitch={row_pitch:.6f} mm, "
+                "centered 2-1-2 sampling per 10x6.5 mm die, "
+                f"ROI={self._format_roi_short(roi)}, initial Z={self._format_saved_z(z) or '-'}; "
+                "calibration includes the wafer rotation."
+            )
+            if used_dummy_z:
+                self.log("Dual-die sites have dummy Z values. Connect Z and update focus values before timelapse.")
+            else:
+                self.log("All dual-die sites use the current Z initially; update focus values where wafer tilt requires it.")
+            self._close_dual_die_grid_dialog()
+        except Exception as exc:
+            self.log(f"Failed to generate dual-die wafer grid: {exc}")
+            messagebox.showerror("Dual-Die Grid", str(exc), parent=getattr(self, "dual_die_grid_dialog", self))
+
+    def open_well_mesh_dialog(self):
+        existing = getattr(self, "well_mesh_dialog", None)
+        try:
+            if existing and existing.winfo_exists():
+                existing.lift()
+                existing.focus_force()
+                return
+        except Exception:
+            pass
+
+        dialog = tk.Toplevel(self)
+        self.well_mesh_dialog = dialog
+        dialog.title("7 x 9 Well Mesh")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_well_mesh_dialog)
+
+        body = tk.Frame(dialog, padx=10, pady=10)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Focus and align each 150 um well center with the ROI-centered Cross.").grid(
+            row=0, column=0, columnspan=5, sticky="w", pady=(0, 7)
+        )
+        for column, label in enumerate(("Point", "X", "Y", "Z [um]")):
+            tk.Label(body, text=label, font=("Segoe UI", 9, "bold")).grid(
+                row=1, column=column, sticky="w", padx=(0, 5)
+            )
+
+        self.well_mesh_calibration_vars = {}
+        calibration_points = (
+            ("R1-C1", "Top-left anchor"),
+            ("R1-C9", "Top-right"),
+            ("R7-C1", "Bottom-left"),
+        )
+        for row_index, (point_name, description) in enumerate(calibration_points, start=2):
+            x_var = tk.StringVar(value="")
+            y_var = tk.StringVar(value="")
+            z_var = tk.StringVar(value="")
+            self.well_mesh_calibration_vars[point_name] = (x_var, y_var, z_var)
+            point_frame = tk.Frame(body)
+            point_frame.grid(row=row_index, column=0, sticky="w", pady=2)
+            tk.Label(point_frame, text=point_name, width=7, anchor="w").pack(side="left")
+            tk.Label(point_frame, text=description, fg=self.theme["muted"]).pack(side="left")
+            tk.Entry(body, textvariable=x_var, width=11).grid(row=row_index, column=1, padx=(5, 4), pady=2)
+            tk.Entry(body, textvariable=y_var, width=11).grid(row=row_index, column=2, padx=(0, 4), pady=2)
+            tk.Entry(body, textvariable=z_var, width=11).grid(row=row_index, column=3, padx=(0, 6), pady=2)
+            tk.Button(
+                body,
+                text="Capture",
+                command=lambda name=point_name: self.capture_well_mesh_calibration_point(name),
+                width=8,
+            ).grid(row=row_index, column=4, pady=2)
+
+        self.well_mesh_y_offset_var = tk.StringVar(value=f"{self.WELL_MESH_DEFAULT_Y_OFFSET_MM:.6f}")
+        tk.Label(body, text="Stage Y offset [mm]").grid(row=5, column=0, sticky="w", pady=(7, 2))
+        tk.Entry(body, textvariable=self.well_mesh_y_offset_var, width=11).grid(
+            row=5, column=1, sticky="w", padx=(5, 4), pady=(7, 2)
+        )
+        tk.Label(body, text="Applied to all generated sites", fg=self.theme["muted"]).grid(
+            row=5, column=2, columnspan=3, sticky="w", pady=(7, 2)
+        )
+
+        details = (
+            "Mesh: 7 rows x 9 columns | 63 well centers\n"
+            "Nominal pitch: 0.300 mm | span: 2.400 x 1.800 mm\n"
+            "Saved Z: plane interpolated from the three focused calibration wells"
+        )
+        tk.Label(body, text=details, justify="left", fg=self.theme["muted"]).grid(
+            row=6, column=0, columnspan=5, sticky="w", pady=(8, 0)
+        )
+
+        actions = tk.Frame(body)
+        actions.grid(row=7, column=0, columnspan=5, sticky="ew", pady=(10, 0))
+        tk.Button(actions, text="Generate 63 Sites", command=self.generate_well_mesh_sites).pack(
+            side="left", fill="x", expand=True, padx=(0, 5)
+        )
+        tk.Button(actions, text="Cancel", command=self._close_well_mesh_dialog, width=8).pack(side="right")
+
+        self._apply_theme_recursive(dialog)
+        dialog.update_idletasks()
+        try:
+            x = self.winfo_rootx() + max(20, (self.winfo_width() - dialog.winfo_width()) // 2)
+            y = self.winfo_rooty() + max(20, (self.winfo_height() - dialog.winfo_height()) // 3)
+            dialog.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+    def _close_well_mesh_dialog(self):
+        dialog = getattr(self, "well_mesh_dialog", None)
+        self.well_mesh_dialog = None
+        self.well_mesh_calibration_vars = {}
+        self.well_mesh_y_offset_var = None
+        try:
+            if dialog and dialog.winfo_exists():
+                dialog.destroy()
+        except Exception:
+            pass
+
+    def capture_well_mesh_calibration_point(self, point_name):
+        try:
+            if not self.tango or not self.tango.connected:
+                raise RuntimeError("Connect the Tango stage first.")
+            if not getattr(self, "micro_z_connected", False):
+                raise RuntimeError("Connect Z and focus this well before Capture.")
+            variables = self.well_mesh_calibration_vars.get(point_name)
+            if not variables:
+                raise RuntimeError(f"Unknown calibration point {point_name}.")
+            with self.stage_lock:
+                x, y, _, _ = self.tango.get_position()
+            z = self._get_current_z_or_nan()
+            if not math.isfinite(float(z)):
+                raise RuntimeError("Could not read a real Z position. Reconnect Z and try again.")
+            variables[0].set(f"{x:.6f}")
+            variables[1].set(f"{y:.6f}")
+            variables[2].set(f"{float(z):.6f}")
+            self.log(f"Captured well mesh {point_name}: X={x:.6f}, Y={y:.6f}, Z={float(z):.6f} um.")
+        except Exception as exc:
+            self.log(f"Failed to capture well mesh calibration point: {exc}")
+            messagebox.showerror("7 x 9 Well Mesh", str(exc), parent=getattr(self, "well_mesh_dialog", self))
+
+    def _read_well_mesh_calibration(self):
+        points = {}
+        for point_name in ("R1-C1", "R1-C9", "R7-C1"):
+            variables = self.well_mesh_calibration_vars.get(point_name)
+            if not variables:
+                raise RuntimeError(f"Capture {point_name} first.")
+            try:
+                values = tuple(float(variable.get()) for variable in variables)
+            except Exception as exc:
+                raise RuntimeError(f"Enter or capture valid X/Y/Z coordinates for {point_name}.") from exc
+            if not all(math.isfinite(value) for value in values):
+                raise RuntimeError(f"Coordinates for {point_name} must be finite.")
+            points[point_name] = values
+        return points
+
+    def _validate_well_mesh_calibration(self, column_span, row_span):
+        column_length = math.hypot(*column_span)
+        row_length = math.hypot(*row_span)
+        expected_column_length = (self.WELL_MESH_COLUMNS - 1) * self.WELL_MESH_PITCH_MM
+        expected_row_length = (self.WELL_MESH_ROWS - 1) * self.WELL_MESH_PITCH_MM
+        if column_length <= 1e-9 or row_length <= 1e-9:
+            raise RuntimeError("Calibration wells must be at different XY positions.")
+        determinant = (column_span[0] * row_span[1]) - (column_span[1] * row_span[0])
+        if abs(determinant) <= (column_length * row_length * 0.10):
+            raise RuntimeError("The measured row and column directions are nearly parallel.")
+        cosine = abs((column_span[0] * row_span[0]) + (column_span[1] * row_span[1])) / (
+            column_length * row_length
+        )
+        if cosine > 0.25:
+            raise RuntimeError("The measured row and column directions are not close enough to perpendicular.")
+        if not math.isclose(column_length, expected_column_length, rel_tol=0.15):
+            raise RuntimeError(
+                f"R1-C1 to R1-C9 measures {column_length:.4f} mm; expected about "
+                f"{expected_column_length:.4f} mm. Check the selected wells."
+            )
+        if not math.isclose(row_length, expected_row_length, rel_tol=0.15):
+            raise RuntimeError(
+                f"R1-C1 to R7-C1 measures {row_length:.4f} mm; expected about "
+                f"{expected_row_length:.4f} mm. Check the selected wells."
+            )
+        return column_length, row_length
+
+    def _build_well_mesh_positions(self, calibration, roi, y_offset_mm):
+        anchor_x, anchor_y, anchor_z = calibration["R1-C1"]
+        right_x, right_y, right_z = calibration["R1-C9"]
+        lower_x, lower_y, lower_z = calibration["R7-C1"]
+        column_step = (
+            (right_x - anchor_x) / (self.WELL_MESH_COLUMNS - 1),
+            (right_y - anchor_y) / (self.WELL_MESH_COLUMNS - 1),
+        )
+        row_step = (
+            (lower_x - anchor_x) / (self.WELL_MESH_ROWS - 1),
+            (lower_y - anchor_y) / (self.WELL_MESH_ROWS - 1),
+        )
+        column_z_step = (right_z - anchor_z) / (self.WELL_MESH_COLUMNS - 1)
+        row_z_step = (lower_z - anchor_z) / (self.WELL_MESH_ROWS - 1)
+        generated = []
+        for row_number in range(1, self.WELL_MESH_ROWS + 1):
+            columns = range(1, self.WELL_MESH_COLUMNS + 1)
+            if row_number % 2 == 0:
+                columns = reversed(tuple(columns))
+            for column_number in columns:
+                column_index = column_number - 1
+                row_index = row_number - 1
+                x = anchor_x + (column_index * column_step[0]) + (row_index * row_step[0])
+                y = anchor_y + (column_index * column_step[1]) + (row_index * row_step[1]) + y_offset_mm
+                z = anchor_z + (column_index * column_z_step) + (row_index * row_z_step)
+                generated.append(
+                    SavedPosition(
+                        f"R{row_number:02d}-C{column_number:02d}",
+                        x,
+                        y,
+                        z,
+                        roi,
+                        z_is_real=True,
+                    )
+                )
+        return generated
+
+    def generate_well_mesh_sites(self):
+        try:
+            if getattr(self, "acquisition_inflight", False):
+                raise RuntimeError("Wait for the current acquisition to finish.")
+            if self.timelapse_thread and self.timelapse_thread.is_alive():
+                raise RuntimeError("Stop the timelapse before replacing Saved Sites.")
+            calibration = self._read_well_mesh_calibration()
+            try:
+                y_offset_mm = float(self.well_mesh_y_offset_var.get())
+            except Exception as exc:
+                raise RuntimeError("Enter a valid Stage Y offset in millimeters.") from exc
+            if not math.isfinite(y_offset_mm):
+                raise RuntimeError("Stage Y offset must be finite.")
+            anchor = calibration["R1-C1"]
+            column_span = (
+                calibration["R1-C9"][0] - anchor[0],
+                calibration["R1-C9"][1] - anchor[1],
+            )
+            row_span = (
+                calibration["R7-C1"][0] - anchor[0],
+                calibration["R7-C1"][1] - anchor[1],
+            )
+            column_length, row_length = self._validate_well_mesh_calibration(column_span, row_span)
+            roi = self._capture_current_roi_for_position()
+            generated = self._build_well_mesh_positions(calibration, roi, y_offset_mm)
+            if len(generated) != self.WELL_MESH_ROWS * self.WELL_MESH_COLUMNS:
+                raise RuntimeError(f"Expected 63 generated sites, got {len(generated)}.")
+            if len({position.name for position in generated}) != len(generated):
+                raise RuntimeError("Generated well mesh site names are not unique.")
+            z_errors = []
+            for position in generated:
+                range_error = self._micro_z_validate_target_range(position.z)
+                if range_error:
+                    z_errors.append(f"{position.name}: {range_error}")
+            if z_errors:
+                raise RuntimeError("Interpolated Z safety check failed: " + "; ".join(z_errors[:3]))
+            if self.positions and not messagebox.askyesno(
+                "Replace Saved Sites",
+                f"Replace the existing {len(self.positions)} Saved Sites with the 63-well mesh?",
+                parent=getattr(self, "well_mesh_dialog", self),
+            ):
+                return
+
+            self.positions = generated
+            self.selected_position_index = 0
+            self.refresh_positions_tree()
+            if hasattr(self, "timelapse_sites_var"):
+                self.timelapse_sites_var.set("all")
+            column_pitch = column_length / (self.WELL_MESH_COLUMNS - 1)
+            row_pitch = row_length / (self.WELL_MESH_ROWS - 1)
+            z_values = [position.z for position in generated]
+            self.log(
+                "Generated 63 well-center sites with fixed ROI framing in serpentine order: "
+                f"column pitch={column_pitch:.6f} mm, row pitch={row_pitch:.6f} mm, "
+                f"Stage Y offset={y_offset_mm:+.6f} mm, "
+                f"Z plane={min(z_values):.3f}..{max(z_values):.3f} um, "
+                f"ROI={self._format_roi_short(roi)}; calibration includes sample rotation and tilt."
+            )
+            self._close_well_mesh_dialog()
+        except Exception as exc:
+            self.log(f"Failed to generate 7 x 9 well mesh: {exc}")
+            messagebox.showerror("7 x 9 Well Mesh", str(exc), parent=getattr(self, "well_mesh_dialog", self))
 
     def on_position_selected(self, _event=None):
         selection = self.positions_tree.selection()

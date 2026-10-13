@@ -22,6 +22,7 @@ from hera_app.mixins.roi import ROIMixin
 from hera_app.mixins.stage import StageMixin
 from hera_app.mixins.theme import ThemeMixin
 from hera_app.mixins.timelapse import TimelapseMixin
+from hera_app.mixins.tissue_scan import TissueScanMixin
 from hera_app.mixins.ui_builder import UIBuilderMixin
 from hera_app.mixins.utils import UtilsMixin
 
@@ -34,6 +35,7 @@ class HeraTriggerApp(
     DeviceMixin,
     MicroManagerZMixin,
     StageMixin,
+    TissueScanMixin,
     ExportMixin,
     FlatfieldMixin,
     AcquisitionMixin,

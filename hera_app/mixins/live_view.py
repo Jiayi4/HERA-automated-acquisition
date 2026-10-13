@@ -1228,6 +1228,8 @@ class LiveViewMixin:
             return
 
         image_x, image_y, frame_width, frame_height = image_pos
+        if self._tissue_landmark_click(image_pos):
+            return
         view_x, view_y = self._raw_live_point_to_view_xy(image_x, image_y)
         if not self.live_roi_selecting:
             if self.live_cross_enabled_var.get():

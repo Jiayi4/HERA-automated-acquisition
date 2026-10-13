@@ -1,2 +1,3 @@
 # tkinter, ctypes, threading, time, and os are included with standard Python on Windows.
 pymmcore>=12.5.0
+numpy>=1.24
