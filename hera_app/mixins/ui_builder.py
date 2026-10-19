@@ -1,7 +1,12 @@
 import os
 import subprocess
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+
+from hera_app.parameter_presets import (
+    DEFAULT_PRESETS, DEFAULT_PRESET_PATH, PRESET_FIELDS,
+    load_parameter_presets, save_parameter_presets, validate_preset, validate_preset_name,
+)
 
 
 class UIBuilderMixin:
@@ -245,6 +250,8 @@ class UIBuilderMixin:
                 pass
 
     def _schedule_auto_apply_parameters(self):
+        if getattr(self, "_loading_parameter_preset", False):
+            return
         if not getattr(self, "controller", None) or not self.controller.connected:
             return
         job = getattr(self, "_auto_apply_parameters_job", None)
@@ -571,6 +578,8 @@ class UIBuilderMixin:
         self.param_vars["bands"] = tk.IntVar(value=0)
         self.param_vars["binning"] = tk.StringVar(value="None")
         self.param_vars["data_type"] = tk.StringVar(value="SinglePrecision")
+        self._build_parameter_preset_bar(spectral)
+        control_row.grid_configure(row=1)
         controls = [
             ("Spectral", "scan_mode", "menu", self.SCAN_MODES.keys(), 8),
             ("Sampling", "spectral_sampling", "menu", self.SPECTRAL_SAMPLING.keys(), 12),
@@ -605,7 +614,7 @@ class UIBuilderMixin:
             pady=2,
         ).grid(row=0, column=set_col, sticky="nsew", padx=(0, 0), pady=(15, 0))
         flatfield_bar = tk.Frame(spectral)
-        flatfield_bar.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        flatfield_bar.grid(row=2, column=0, sticky="ew", pady=(6, 0))
         tk.Label(flatfield_bar, text="Flatfield", font=control_label_font, fg=self.theme["muted"]).pack(side="left", padx=(0, 6))
         tk.Label(flatfield_bar, textvariable=self.flatfield_status_var, font=control_font, width=28, anchor="w").pack(side="left", padx=(0, 5))
         self.flatfield_acquire_button = tk.Button(
@@ -633,6 +642,91 @@ class UIBuilderMixin:
         self.flatfield_clear_button.pack(side="left", padx=(0, 4))
 
         self._build_views_and_log(parent)
+
+    def _parameter_preset_choices(self):
+        return {
+            "scan_mode": self.SCAN_MODES,
+            "spectral_sampling": self.SPECTRAL_SAMPLING,
+            "averages": (1, 2, 3),
+            "binning": self.BINNING_OPTIONS,
+            "data_type": self.DATA_TYPES,
+        }
+
+    def _build_parameter_preset_bar(self, parent):
+        self.parameter_preset_path = getattr(self, "parameter_preset_path", DEFAULT_PRESET_PATH)
+        try:
+            self.parameter_presets = load_parameter_presets(self.parameter_preset_path, self._parameter_preset_choices())
+        except (OSError, ValueError) as exc:
+            self.parameter_presets = {name: dict(settings) for name, settings in DEFAULT_PRESETS.items()}
+            self.log(f"Could not load parameter presets: {exc}. Using built-in Fluo/BF; existing file left unchanged.")
+        bar = tk.Frame(parent)
+        bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        tk.Label(bar, text="Preset", font=("Segoe UI", 8), fg=self.theme["muted"]).pack(side="left", padx=(0, 6))
+        self.parameter_preset_var = tk.StringVar(value="Fluo")
+        self.parameter_preset_menu = tk.OptionMenu(bar, self.parameter_preset_var, *self.parameter_presets)
+        self.parameter_preset_menu.config(width=16, font=("Segoe UI", 9), padx=4, pady=1, highlightthickness=0)
+        self.parameter_preset_menu["menu"].config(font=("Segoe UI", 9))
+        self.parameter_preset_menu.pack(side="left", padx=(0, 6))
+        for text, command in (("Load", self.load_parameter_preset), ("Save", self.save_parameter_preset)):
+            button = tk.Button(bar, text=text, command=command, font=("Segoe UI", 9), padx=6, pady=1)
+            button._hera_control_bar_button = True
+            button.pack(side="left", padx=(0, 4))
+
+    def load_parameter_preset(self):
+        thread = getattr(self, "timelapse_thread", None)
+        reason = "a site loop/timelapse is active" if thread and thread.is_alive() else self._acquisition_busy_reason(include_sdk=False)
+        if reason:
+            self.log(f"Preset load skipped: {reason}.", detail=False)
+            return
+        name = self.parameter_preset_var.get()
+        try:
+            settings = validate_preset(self.parameter_presets.get(name), self._parameter_preset_choices())
+        except ValueError as exc:
+            self.log(f"Preset load failed: {exc}", detail=False)
+            return
+        # Stage all fields together; only the existing Set action may send them to Hera.
+        job = getattr(self, "_auto_apply_parameters_job", None)
+        if job:
+            self.after_cancel(job)
+            self._auto_apply_parameters_job = None
+        self._loading_parameter_preset = True
+        try:
+            for field, value in settings.items():
+                self.param_vars[field].set(value)
+        finally:
+            self._loading_parameter_preset = False
+        self.log(f"Preset {name} loaded into Control Bar. Press Set to apply.", detail=False)
+
+    def save_parameter_preset(self):
+        try:
+            settings = validate_preset(
+                {field: self.param_vars[field].get() for field in PRESET_FIELDS},
+                self._parameter_preset_choices(),
+            )
+            name = simpledialog.askstring("Save Parameter Preset", "Preset name:",
+                                          initialvalue=self.parameter_preset_var.get(), parent=self)
+            if name is None:
+                return
+            name = validate_preset_name(name)
+            # Re-read before saving so an unreadable file is never silently overwritten.
+            presets = load_parameter_presets(self.parameter_preset_path, self._parameter_preset_choices())
+            if name in presets and not messagebox.askyesno(
+                "Replace Preset", f"Replace the saved {name!r} settings?", parent=self,
+            ):
+                return
+            presets[name] = settings
+            save_parameter_presets(self.parameter_preset_path, presets, self._parameter_preset_choices())
+        except (OSError, ValueError, tk.TclError) as exc:
+            self.log(f"Preset save failed: {exc}", detail=False)
+            messagebox.showerror("Preset Save Failed", str(exc), parent=self)
+            return
+        self.parameter_presets = presets
+        menu = self.parameter_preset_menu["menu"]
+        menu.delete(0, "end")
+        for preset_name in presets:
+            menu.add_command(label=preset_name, command=tk._setit(self.parameter_preset_var, preset_name))
+        self.parameter_preset_var.set(name)
+        self.log(f"Preset {name} saved: {self.parameter_preset_path}", detail=False)
 
     def _build_views_and_log(self, parent):
         views_frame = tk.Frame(parent, bg=self.theme["bg"])
