@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from hera_app.tissue_scan import FieldCalibration, FocusSurface, build_tissue_plan, select_tissue_test_tiles
+from hera_app.tissue_scan import FieldCalibration, FocusSurface, build_tissue_plan, remove_tissue_tile, remove_tissue_tiles, select_tissue_test_tiles
 
 
 class TissueGeometryTests(unittest.TestCase):
@@ -58,6 +58,63 @@ class TissueGeometryTests(unittest.TestCase):
         calibration = FieldCalibration((1, 0), (0, 1))
         plan = build_tissue_plan(calibration, self.make_bounds(calibration, (0, 0), 0.2, 0.3), margin=0)
         self.assertEqual(len(plan["tiles"]), 1)
+
+    def test_custom_overlap_controls_both_calibrated_axes_and_coverage(self):
+        calibration = FieldCalibration((0.8, 0.6), (-0.3, 0.4))
+        for overlap in (0, 10, 12.5, 30, 80):
+            with self.subTest(overlap=overlap):
+                plan = build_tissue_plan(calibration, self.make_bounds(calibration, (-9, 13)),
+                                         margin=0, overlap_percent=overlap)
+                self.assertEqual(plan["overlap_percent"], overlap)
+                us = sorted({tile["u"] for tile in plan["tiles"]})
+                vs = sorted({tile["v"] for tile in plan["tiles"]})
+                self.assertAlmostEqual(us[1] - us[0], 1 - overlap / 100)
+                self.assertAlmostEqual(vs[1] - vs[0], 1 - overlap / 100)
+                left, top, right, bottom = plan["bounds"]
+                self.assertLessEqual(us[0] - 0.5, left + 1e-12)
+                self.assertGreaterEqual(us[-1] + 0.5, right - 1e-12)
+                self.assertLessEqual(vs[0] - 0.5, top + 1e-12)
+                self.assertGreaterEqual(vs[-1] + 0.5, bottom - 1e-12)
+                for row in range(1, plan["rows"] + 1):
+                    columns = [tile["column"] for tile in plan["tiles"] if tile["row"] == row]
+                    self.assertEqual(columns, sorted(columns, reverse=row % 2 == 0))
+
+    def test_overlap_rejects_invalid_values_and_excessive_tile_counts(self):
+        calibration = FieldCalibration((1, 0), (0, 1))
+        bounds = self.make_bounds(calibration, (0, 0))
+        for overlap in (-1, 100, 101, float("nan"), float("inf"), 99.99):
+            with self.subTest(overlap=overlap), self.assertRaises(ValueError):
+                build_tissue_plan(calibration, bounds, overlap_percent=overlap)
+
+    def test_remove_tile_preserves_geometry_names_and_order(self):
+        calibration = FieldCalibration((1, 0), (0, 1))
+        plan = build_tissue_plan(calibration, self.make_bounds(calibration, (0, 0)), margin=0)
+        tile = plan["tiles"][2]
+        result = remove_tissue_tile(plan, (tile["row"], tile["column"]))
+        self.assertEqual(result["tiles"], plan["tiles"][:2] + plan["tiles"][3:])
+        self.assertEqual(result["bounds"], plan["bounds"])
+        self.assertEqual((result["rows"], result["columns"]), (plan["rows"], plan["columns"]))
+        self.assertEqual(result["focus_extrapolated_count"], sum(t["focus_extrapolated"] for t in result["tiles"]))
+        self.assertEqual(len(plan["tiles"]), len(result["tiles"]) + 1)
+        with self.assertRaises(ValueError):
+            remove_tissue_tile(result, (tile["row"], tile["column"]))
+        result["tiles"] = result["tiles"][:1]
+        last = result["tiles"][0]
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            remove_tissue_tile(result, (last["row"], last["column"]))
+
+    def test_bulk_tile_removal_is_atomic_and_keeps_serpentine_order(self):
+        calibration = FieldCalibration((1, 0), (0, 1))
+        plan = build_tissue_plan(calibration, self.make_bounds(calibration, (0, 0)), margin=0)
+        cells = {(1, 2), (2, 4), (3, 1)}
+        result = remove_tissue_tiles(plan, cells)
+        self.assertEqual(result["tiles"], [t for t in plan["tiles"] if (t["row"], t["column"]) not in cells])
+        self.assertEqual(result["focus_extrapolated_count"], sum(t["focus_extrapolated"] for t in result["tiles"]))
+        self.assertEqual(len(plan["tiles"]), 12)
+        for invalid in (set(), cells | {(999, 1)}, {(t["row"], t["column"]) for t in plan["tiles"]}):
+            with self.assertRaises(ValueError):
+                remove_tissue_tiles(plan, invalid)
+            self.assertEqual(len(plan["tiles"]), 12)
 
     def test_internal_focus_changes_prediction_and_preserves_measured_values(self):
         points = [(0, 1, 1000), (2, 1, 1000), (1, 0, 1000), (1, 2, 1000)]

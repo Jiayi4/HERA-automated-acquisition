@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from hera_app.controllers import SavedPosition
-from hera_app.tissue_scan import FieldCalibration, build_tissue_plan, select_tissue_test_tiles, validate_tissue_plan
+from hera_app.tissue_scan import FieldCalibration, build_tissue_plan, remove_tissue_tiles, select_tissue_test_tiles, validate_tissue_plan
 
 
 class TissueScanMixin:
@@ -37,7 +37,6 @@ class TissueScanMixin:
         header = tk.Frame(dialog, padx=14, pady=10)
         header.pack(fill="x")
         tk.Label(header, text="Tissue Scan Plan", font=("Segoe UI", 14, "bold")).pack(side="left")
-        tk.Label(header, text="Overlap 10%", fg=self.theme["muted"]).pack(side="right")
         self.tissue_scan_status = tk.StringVar(value="Pick A near the center, B near a side, C in a different direction; use the same landmark.")
         self.tissue_scan_notebook = ttk.Notebook(dialog)
         self.tissue_scan_notebook.pack(fill="both", expand=True, padx=14)
@@ -106,6 +105,9 @@ class TissueScanMixin:
         tk.Label(options, text="Edge margin [% FOV]").pack(side="left", padx=(15, 5))
         self.tissue_scan_margin = tk.StringVar(value="5")
         tk.Entry(options, textvariable=self.tissue_scan_margin, width=6).pack(side="left")
+        tk.Label(options, text="Overlap [%]").pack(side="left", padx=(15, 5))
+        self.tissue_scan_overlap = tk.StringVar(value="10")
+        tk.Entry(options, textvariable=self.tissue_scan_overlap, width=6).pack(side="left")
         tk.Label(parent, text="Additional focus points", anchor="w", font=("Segoe UI", 10, "bold")).pack(fill="x")
         self.tissue_scan_focus_tree = ttk.Treeview(parent, columns=("xy", "z"), show="headings", height=5)
         self.tissue_scan_focus_tree.heading("xy", text="Stage XY [mm]")
@@ -125,14 +127,21 @@ class TissueScanMixin:
         self.tissue_scan_canvas.pack(fill="both", expand=True, pady=8)
         self.tissue_scan_canvas.bind("<Configure>", lambda _event: self._draw_tissue_preview())
         self.tissue_scan_canvas.bind("<Button-1>", self._select_tissue_tile)
+        self.tissue_scan_canvas.bind("<B1-Motion>", lambda event: self._drag_tissue_selection(event, False))
+        self.tissue_scan_canvas.bind("<ButtonRelease-1>", lambda event: self._finish_tissue_selection(event, False))
         self.tissue_scan_tile_info = tk.StringVar(value="No tile selected")
         tk.Label(parent, textvariable=self.tissue_scan_tile_info, anchor="w", wraplength=690).pack(fill="x")
         actions = tk.Frame(parent)
         actions.pack(fill="x", pady=10)
-        tk.Button(actions, text="Go To Tile", command=self._goto_tissue_tile).pack(side="left")
+        self.tissue_scan_go_button = tk.Button(actions, text="Go To Tile", command=self._goto_tissue_tile)
+        self.tissue_scan_go_button.pack(side="left")
         tk.Button(actions, text="Export Plan", command=self.export_tissue_plan).pack(side="left", padx=8)
+        self.tissue_scan_delete_button = tk.Button(actions, text="Delete Tiles", command=self.delete_tissue_preview_tile,
+                                                  state="disabled")
+        self.tissue_scan_delete_button.pack(side="left")
         tk.Button(actions, text="Generate Saved Sites", command=self.generate_tissue_sites).pack(side="right")
         self.tissue_scan_selected_tile = 0
+        self.tissue_scan_selected_cells = None
 
     def _tissue_signature(self):
         roi = self._capture_current_roi_for_position()
@@ -401,6 +410,8 @@ class TissueScanMixin:
 
     def _invalidate_tissue_plan(self):
         self.tissue_scan_plan = None
+        self.tissue_scan_selected_cells = None
+        self.tissue_scan_selection_drag = None
         self.tissue_scan_summary.set("Preview needs refreshing")
         self.tissue_scan_tile_info.set("No tile selected")
         self._draw_tissue_preview()
@@ -411,7 +422,8 @@ class TissueScanMixin:
             raise ValueError("Wait for Capture to finish.")
         state = self.tissue_scan_state
         plan = build_tissue_plan(self._tissue_calibration(), state["boundaries"], state["focus"],
-                                 margin=float(self.tissue_scan_margin.get()) / 100)
+                                 margin=float(self.tissue_scan_margin.get()) / 100,
+                                 overlap_percent=float(self.tissue_scan_overlap.get()))
         for tile in plan["tiles"]:
             error = self._micro_z_validate_target_range(tile["z"])
             if error:
@@ -424,19 +436,24 @@ class TissueScanMixin:
         try:
             self.tissue_scan_plan = self._make_tissue_plan()
             self.tissue_scan_selected_tile = 0
-            plan = self.tissue_scan_plan
-            values = [tile["z"] for tile in plan["tiles"]]
-            self.tissue_scan_summary.set(
-                f"{plan['rows']} rows x {plan['columns']} columns | {len(values)} tiles | Overlap 10%\n"
-                f"Estimated Z: {min(values):.3f} - {max(values):.3f} um | "
-                f"{plan['focus_extrapolated_count']} tiles beyond focused area"
-            )
+            self.tissue_scan_selected_cells = None
+            self.tissue_scan_selection_drag = None
+            self._refresh_tissue_preview_summary()
             self.tissue_scan_status.set("Initial Z only; check edge tiles and uneven tissue before scanning.")
             self.tissue_scan_notebook.select(2)
             self._draw_tissue_preview()
         except Exception as exc:
             self._invalidate_tissue_plan()
             self._tissue_error(exc)
+
+    def _refresh_tissue_preview_summary(self):
+        plan = self.tissue_scan_plan
+        values = [tile["z"] for tile in plan["tiles"]]
+        self.tissue_scan_summary.set(
+            f"{plan['rows']} rows x {plan['columns']} columns | {len(values)} tiles | Overlap {plan['overlap_percent']:g}%\n"
+            f"Estimated Z: {min(values):.3f} - {max(values):.3f} um | "
+            f"{plan['focus_extrapolated_count']} tiles beyond focused area"
+        )
 
     def _draw_tissue_preview(self):
         canvas = getattr(self, "tissue_scan_canvas", None)
@@ -445,8 +462,14 @@ class TissueScanMixin:
         canvas.delete("all")
         plan = self.tissue_scan_plan
         if not plan:
+            self.tissue_scan_delete_button.configure(state="disabled")
+            self.tissue_scan_go_button.configure(state="disabled")
             return
         tiles = plan["tiles"]
+        selected = self._tissue_selection_records(False)
+        cells = {(tile["row"], tile["column"]) for tile in selected}
+        self.tissue_scan_delete_button.configure(state="normal" if 0 < len(selected) < len(tiles) else "disabled")
+        self.tissue_scan_go_button.configure(state="normal" if len(selected) == 1 else "disabled")
         low_u = min(tile["u"] for tile in tiles) - 0.5
         high_u = max(tile["u"] for tile in tiles) + 0.5
         low_v = min(tile["v"] for tile in tiles) - 0.5
@@ -469,11 +492,12 @@ class TissueScanMixin:
         path = []
         for i, tile in enumerate(tiles):
             color = self.theme["accent_soft"] if tile["focus_extrapolated"] else self.theme["accent"]
-            if i == self.tissue_scan_selected_tile:
+            is_selected = (tile["row"], tile["column"]) in cells
+            if is_selected:
                 color = "#46d66f"
             canvas.create_rectangle(*point(tile["u"] - 0.5, tile["v"] - 0.5),
                                     *point(tile["u"] + 0.5, tile["v"] + 0.5), outline=color,
-                                    width=2 if i == self.tissue_scan_selected_tile else 1)
+                                    width=2 if is_selected else 1)
             path.extend(point(tile["u"], tile["v"]))
         if len(path) > 2:
             canvas.create_line(*path, fill=self.theme["muted"], dash=(3, 5))
@@ -482,29 +506,129 @@ class TissueScanMixin:
                 u, v = self._tissue_calibration().project(xyz[:2], plan["origin"])
                 x, y = point(u, v)
                 canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill=self.theme["text"], outline="")
-        tile = tiles[self.tissue_scan_selected_tile]
+        if len(selected) != 1:
+            self.tissue_scan_tile_info.set(f"{len(selected)} tiles selected" if selected else "No tile selected")
+            return
+        tile = selected[0]
         self.tissue_scan_tile_info.set(
             f"{tile['name']} | X {tile['x']:.6f}  Y {tile['y']:.6f} mm | Z {tile['z']:.3f} um"
             + (" | Check focus: outside measured area" if tile["focus_extrapolated"] else "")
         )
 
     def _select_tissue_tile(self, event):
-        if not self.tissue_scan_plan:
+        self._select_tissue_canvas_tile(event, False)
+
+    def _tissue_selection_records(self, layout):
+        prefix = "tissue_layout" if layout else "tissue_scan"
+        plan = getattr(self, prefix + "_plan", None)
+        records = getattr(self, "tissue_layout_drawn_records", []) if layout else (plan["tiles"] if plan else [])
+        cells = getattr(self, prefix + "_selected_cells", None)
+        if cells is None:
+            primary = getattr(self, "tissue_layout_selected_cell", None) if layout else None
+            if not layout and records:
+                index = self.tissue_scan_selected_tile or 0
+                if 0 <= index < len(records):
+                    primary = (records[index]["row"], records[index]["column"])
+            if primary is None and records:
+                primary = (records[0]["row"], records[0]["column"])
+            cells = {primary} if primary else set()
+        cells = cells & {(tile["row"], tile["column"]) for tile in records}
+        setattr(self, prefix + "_selected_cells", cells)
+        selected = [tile for tile in records if (tile["row"], tile["column"]) in cells]
+        if layout:
+            self.tissue_layout_selected_cell = (selected[0]["row"], selected[0]["column"]) if len(selected) == 1 else None
+        else:
+            self.tissue_scan_selected_tile = next((i for i, tile in enumerate(records) if tile is selected[0]), None) if len(selected) == 1 else None
+        return selected
+
+    def _set_tissue_selection(self, cells, layout):
+        setattr(self, ("tissue_layout" if layout else "tissue_scan") + "_selected_cells", set(cells))
+        if layout:
+            self._refresh_tissue_layout_selection()
+        else:
+            self._draw_tissue_preview()
+
+    def _select_tissue_canvas_tile(self, event, layout):
+        prefix = "tissue_layout" if layout else "tissue_scan"
+        records = getattr(self, "tissue_layout_drawn_records", []) if layout else \
+            (self.tissue_scan_plan["tiles"] if self.tissue_scan_plan else [])
+        if not records:
             return
-        left, top, scale, aspect, low_u, low_v = self.tissue_scan_preview_transform
+        selected = self._tissue_selection_records(layout)
+        cells = {(tile["row"], tile["column"]) for tile in selected}
+        additive = bool(getattr(event, "state", 0) & 0x0004)
+        setattr(self, prefix + "_selection_drag", (event.x, event.y, cells.copy(), additive))
+        transform = self.tissue_layout_transform if layout else self.tissue_scan_preview_transform
+        left, top, scale, aspect, low_u, low_v = transform
         u, v = (event.x - left) / (scale * aspect) + low_u, (event.y - top) / scale + low_v
-        tiles = self.tissue_scan_plan["tiles"]
-        self.tissue_scan_selected_tile = min(range(len(tiles)), key=lambda i: (tiles[i]["u"] - u) ** 2 + (tiles[i]["v"] - v) ** 2)
-        self._draw_tissue_preview()
+        candidates = [tile for tile in records if abs(tile["u"] - u) <= 0.5 and abs(tile["v"] - v) <= 0.5]
+        if candidates:
+            tile = min(candidates, key=lambda t: (t["u"] - u) ** 2 + (t["v"] - v) ** 2)
+            cell = (tile["row"], tile["column"])
+            cells = cells ^ {cell} if additive else {cell}
+        elif not additive:
+            cells = set()
+        self._set_tissue_selection(cells, layout)
+
+    def _drag_tissue_selection(self, event, layout):
+        prefix = "tissue_layout" if layout else "tissue_scan"
+        drag = getattr(self, prefix + "_selection_drag", None)
+        if drag is None or max(abs(event.x - drag[0]), abs(event.y - drag[1])) < 4:
+            return
+        canvas = self.tissue_layout_canvas if layout else self.tissue_scan_canvas
+        canvas.delete("selection_box")
+        canvas.create_rectangle(drag[0], drag[1], event.x, event.y, outline=self.theme["accent"],
+                                dash=(4, 3), tags="selection_box")
+
+    def _finish_tissue_selection(self, event, layout):
+        prefix = "tissue_layout" if layout else "tissue_scan"
+        drag = getattr(self, prefix + "_selection_drag", None)
+        setattr(self, prefix + "_selection_drag", None)
+        canvas = self.tissue_layout_canvas if layout else self.tissue_scan_canvas
+        canvas.delete("selection_box")
+        if drag is None or max(abs(event.x - drag[0]), abs(event.y - drag[1])) < 4:
+            return
+        transform = self.tissue_layout_transform if layout else self.tissue_scan_preview_transform
+        left, top, scale, aspect, low_u, low_v = transform
+        x0, x1 = sorted((drag[0], event.x))
+        y0, y1 = sorted((drag[1], event.y))
+        records = self.tissue_layout_drawn_records if layout else (self.tissue_scan_plan["tiles"] if self.tissue_scan_plan else [])
+        cells = {(tile["row"], tile["column"]) for tile in records
+                 if x0 <= left + (tile["u"] - low_u) * scale * aspect <= x1
+                 and y0 <= top + (tile["v"] - low_v) * scale <= y1}
+        if drag[3]:
+            cells |= drag[2]
+        self._set_tissue_selection(cells, layout)
 
     def _require_current_tissue_plan(self):
         self._check_tissue_context()
         if self.tissue_scan_capture_busy:
             raise ValueError("Wait for Capture to finish.")
         plan = self.tissue_scan_plan
-        if not plan or plan["margin_percent"] != float(self.tissue_scan_margin.get()):
+        if not plan or plan["margin_percent"] != float(self.tissue_scan_margin.get()) or \
+                plan["overlap_percent"] != float(self.tissue_scan_overlap.get()):
             raise ValueError("Click Preview Grid before continuing.")
         return plan
+
+    def delete_tissue_preview_tile(self):
+        try:
+            plan = self._require_current_tissue_plan()
+            selected = self._tissue_selection_records(False)
+            cells = {(tile["row"], tile["column"]) for tile in selected}
+            updated = remove_tissue_tiles(plan, cells)
+            names = ", ".join(tile["name"] for tile in selected[:8]) + (", ..." if len(selected) > 8 else "")
+            if not messagebox.askyesno("Delete Tiles", f"Remove {len(selected)} selected tiles from this preview?\n{names}",
+                                      parent=self.tissue_scan_dialog):
+                return
+            self.tissue_scan_plan = updated
+            self.tissue_scan_selected_cells = set()
+            self.tissue_scan_selection_drag = None
+            self._refresh_tissue_preview_summary()
+            self._draw_tissue_preview()
+            self.tissue_scan_status.set(f"Removed {len(selected)} tiles. {len(updated['tiles'])} tiles remain.")
+            self.log(f"Tissue Scan preview removed {len(selected)} tiles: {names}; remaining tile coordinates unchanged.")
+        except Exception as exc:
+            self._tissue_error(exc)
 
     def _tissue_position(self, tile):
         return SavedPosition(tile["name"], tile["x"], tile["y"], tile["z"],
@@ -512,8 +636,11 @@ class TissueScanMixin:
 
     def _goto_tissue_tile(self):
         try:
-            plan = self._require_current_tissue_plan()
-            self._move_stage_to_saved_position_async(self._tissue_position(plan["tiles"][self.tissue_scan_selected_tile]))
+            self._require_current_tissue_plan()
+            selected = self._tissue_selection_records(False)
+            if len(selected) != 1:
+                raise ValueError("Select one tile for Go To.")
+            self._move_stage_to_saved_position_async(self._tissue_position(selected[0]))
         except Exception as exc:
             self._tissue_error(exc)
 
@@ -529,12 +656,14 @@ class TissueScanMixin:
             self.positions = [self._tissue_position(tile) for tile in plan["tiles"]]
             self.tissue_layout_plan = copy.deepcopy(plan)
             self.tissue_layout_selected_cell = None
+            self.tissue_layout_selected_cells = None
+            self.tissue_layout_selection_drag = None
             self.tissue_layout_calibration = copy.deepcopy(self.tissue_scan_state)
             self.tissue_layout_sites = list(self.positions)
             self.selected_position_index = 0
             self.refresh_positions_tree()
             self.timelapse_sites_var.set("all")
-            self.log(f"Tissue Scan generated {count} sites: {plan['rows']}x{plan['columns']}, overlap=10%, "
+            self.log(f"Tissue Scan generated {count} sites: {plan['rows']}x{plan['columns']}, overlap={plan['overlap_percent']:g}%, "
                      f"ROI={self.tissue_scan_state['signature']['roi']}, "
                      f"focus extrapolated={plan['focus_extrapolated_count']}. Check saved Z before scanning.")
             self.tissue_scan_status.set(f"Generated {count} Saved Sites. Check focus, export the table, then Run One Loop.")
@@ -573,8 +702,8 @@ class TissueScanMixin:
                 data = json.load(handle)
             if data.get("type") != "hera_tissue_calibration" or data.get("version") != 1:
                 raise ValueError("Not a supported Tissue Scan Plan calibration file.")
-            if data["signature"] != self.tissue_scan_state["signature"]:
-                raise ValueError("This calibration uses a different ROI, live size, rotation or binning.")
+            if any(data["signature"][key] != self.tissue_scan_state["signature"][key] for key in ("roi", "rotation", "binning")):
+                raise ValueError("This calibration uses a different ROI, rotation or binning.")
             points = data["landmarks"]
             FieldCalibration.from_landmarks([points[key] for key in ("A", "B", "C")],
                                            self._live_display_dimensions(*data["signature"]["roi"][2:]))
@@ -610,6 +739,7 @@ class TissueScanMixin:
     def _close_tissue_scan_dialog(self):
         dialog = getattr(self, "tissue_scan_dialog", None)
         self.tissue_scan_pick = None
+        self.tissue_scan_selection_drag = None
         self.tissue_scan_dialog = None
         if dialog and dialog.winfo_exists():
             dialog.destroy()
@@ -623,6 +753,7 @@ class TissueScanMixin:
             return
         window = tk.Toplevel(self)
         self.tissue_layout_window = window
+        self.tissue_layout_selection_drag = None
         window.title("Scan Layout")
         window.transient(self)
         window.geometry("630x530")
@@ -642,7 +773,11 @@ class TissueScanMixin:
         self.tissue_layout_z_button.pack(side="left", padx=6)
         self.tissue_layout_test_button = tk.Button(actions, text="Run 2x2 Test", command=self.run_tissue_2x2_test)
         self.tissue_layout_test_button.pack(side="left")
-        self.tissue_layout_generate_button = tk.Button(actions, text="Generate Sites", command=self.generate_sites_from_tissue_plan)
+        self.tissue_layout_delete_button = tk.Button(actions, text="Delete Tiles", command=self.delete_tissue_layout_tile)
+        self.tissue_layout_delete_button.pack(side="right")
+        generate_row = tk.Frame(window, padx=12)
+        generate_row.pack(side="bottom", fill="x", before=actions, pady=(0, 6))
+        self.tissue_layout_generate_button = tk.Button(generate_row, text="Generate Sites", command=self.generate_sites_from_tissue_plan)
         self.tissue_layout_generate_button.pack(side="right")
         self.tissue_layout_summary = tk.StringVar(value="No layout loaded")
         tk.Label(window, textvariable=self.tissue_layout_summary, anchor="w").pack(fill="x", padx=12)
@@ -654,6 +789,8 @@ class TissueScanMixin:
         self.tissue_layout_canvas.pack(fill="both", expand=True, padx=12, pady=8)
         self.tissue_layout_canvas.bind("<Configure>", lambda _event: self._draw_tissue_layout())
         self.tissue_layout_canvas.bind("<Button-1>", self._select_tissue_layout_tile)
+        self.tissue_layout_canvas.bind("<B1-Motion>", lambda event: self._drag_tissue_selection(event, True))
+        self.tissue_layout_canvas.bind("<ButtonRelease-1>", lambda event: self._finish_tissue_selection(event, True))
         self.tissue_layout_selection_text = tk.StringVar(value="No tile selected")
         tk.Label(window, textvariable=self.tissue_layout_selection_text, anchor="w", wraplength=450).pack(fill="x", padx=12)
         self.tissue_layout_status = tk.StringVar(value="Waiting for position")
@@ -736,13 +873,10 @@ class TissueScanMixin:
         return left + (u - low_u) * scale * aspect, top + (v - low_v) * scale
 
     def _tissue_layout_selected_record(self):
-        records = getattr(self, "tissue_layout_drawn_records", [])
-        if not records:
-            raise ValueError("Load or generate a plan first.")
-        cell = getattr(self, "tissue_layout_selected_cell", None)
-        record = next((t for t in records if (t["row"], t["column"]) == cell), records[0])
-        self.tissue_layout_selected_cell = (record["row"], record["column"])
-        return record
+        records = self._tissue_selection_records(True)
+        if len(records) != 1:
+            raise ValueError("Select one tile for this action.")
+        return records[0]
 
     def _tissue_layout_position_map(self):
         plan = getattr(self, "tissue_layout_plan", None)
@@ -772,19 +906,25 @@ class TissueScanMixin:
     def _refresh_tissue_layout_selection(self):
         canvas = self.tissue_layout_canvas
         canvas.delete("selected")
-        for button in (self.tissue_layout_go_button, self.tissue_layout_z_button, self.tissue_layout_test_button):
+        for button in (self.tissue_layout_go_button, self.tissue_layout_z_button, self.tissue_layout_test_button,
+                       self.tissue_layout_delete_button):
             button.configure(state="disabled")
-        try:
-            record = self._tissue_layout_selected_record()
-        except ValueError:
-            self.tissue_layout_selection_text.set("No tile selected")
-            return
-        canvas.create_rectangle(*self._tissue_layout_point(record["u"] - 0.5, record["v"] - 0.5),
-                                *self._tissue_layout_point(record["u"] + 0.5, record["v"] + 0.5),
-                                outline=self.theme["accent"], width=2, tags="selected")
-        self.tissue_layout_selection_text.set(f"Selected: {record['name']} | X {record['x']:.4f}  "
-                                             f"Y {record['y']:.4f} mm | Z {record['z']:.3f} um")
+        selected = self._tissue_selection_records(True)
+        for record in selected:
+            canvas.create_rectangle(*self._tissue_layout_point(record["u"] - 0.5, record["v"] - 0.5),
+                                    *self._tissue_layout_point(record["u"] + 0.5, record["v"] + 0.5),
+                                    outline=self.theme["accent"], width=2, tags="selected")
+        if len(selected) == 1:
+            record = selected[0]
+            self.tissue_layout_selection_text.set(f"Selected: {record['name']} | X {record['x']:.4f}  "
+                                                 f"Y {record['y']:.4f} mm | Z {record['z']:.3f} um")
+        else:
+            self.tissue_layout_selection_text.set(f"{len(selected)} tiles selected" if selected else "No tile selected")
         if getattr(self, "tissue_layout_z_update_busy", False):
+            return
+        if 0 < len(selected) < len(self.tissue_layout_drawn_records):
+            self.tissue_layout_delete_button.configure(state="normal")
+        if len(selected) != 1:
             return
         try:
             self._tissue_layout_position_for_cell(self.tissue_layout_selected_cell)
@@ -799,17 +939,7 @@ class TissueScanMixin:
             pass
 
     def _select_tissue_layout_tile(self, event):
-        records = getattr(self, "tissue_layout_drawn_records", [])
-        if not records:
-            return
-        left, top, scale, aspect, low_u, low_v = self.tissue_layout_transform
-        u, v = (event.x - left) / (scale * aspect) + low_u, (event.y - top) / scale + low_v
-        candidates = [t for t in records if abs(t["u"] - u) <= 0.5 and abs(t["v"] - v) <= 0.5]
-        if not candidates:
-            return
-        tile = min(candidates, key=lambda t: (t["u"] - u) ** 2 + (t["v"] - v) ** 2)
-        self.tissue_layout_selected_cell = (tile["row"], tile["column"])
-        self._refresh_tissue_layout_selection()
+        self._select_tissue_canvas_tile(event, True)
 
     def _tissue_layout_available_records(self):
         positions = self._tissue_layout_position_map()
@@ -833,6 +963,49 @@ class TissueScanMixin:
             self.refresh_positions_tree()
             self._apply_position_roi_to_ui(position)
             self._move_stage_to_saved_position_async(position)
+        except Exception as exc:
+            messagebox.showerror("Scan Layout", str(exc), parent=self.tissue_layout_window)
+
+    def delete_tissue_layout_tile(self):
+        try:
+            self._tissue_layout_require_idle()
+            selected_tiles = self._tissue_selection_records(True)
+            cells = {(tile["row"], tile["column"]) for tile in selected_tiles}
+            references = getattr(self, "tissue_layout_sites", [])
+            tiles = self._tissue_layout_records() if references else self.tissue_layout_plan["tiles"]
+            source = dict(self.tissue_layout_plan, tiles=tiles)
+            updated = remove_tissue_tiles(source, cells)
+            indices_to_remove = {i for i, tile in enumerate(source["tiles"]) if (tile["row"], tile["column"]) in cells}
+            removed_ids = {id(p) for i, p in enumerate(references) if i in indices_to_remove}
+            linked = any(id(p) in removed_ids for p in self.positions)
+            note = "\nAlso remove their associated Saved Sites." if linked else ""
+            names = ", ".join(tile["name"] for tile in selected_tiles[:8]) + (", ..." if len(selected_tiles) > 8 else "")
+            if not messagebox.askyesno("Delete Tiles", f"Remove {len(selected_tiles)} selected tiles from the plan?\n{names}{note}",
+                                      parent=self.tissue_layout_window):
+                return
+            if linked:
+                sites_text = self.timelapse_sites_var.get().strip()
+                selected = None
+                if sites_text.lower() == "none":
+                    selected = []
+                elif sites_text.lower() not in ("", "all", "*"):
+                    indices = self._parse_timelapse_site_indices(sites_text, len(self.positions))
+                    selected = [self.positions[i] for i in indices if id(self.positions[i]) not in removed_ids]
+                self.positions = [p for p in self.positions if id(p) not in removed_ids]
+                if selected is not None:
+                    numbers = {id(p): str(i + 1) for i, p in enumerate(self.positions)}
+                    self.timelapse_sites_var.set(",".join(numbers[id(p)] for p in selected) or "none")
+                self.selected_position_index = None
+                self.refresh_positions_tree()
+            self.tissue_layout_plan = updated
+            if references:
+                self.tissue_layout_sites = [p for i, p in enumerate(references) if i not in indices_to_remove]
+            self.tissue_layout_selected_cell = None
+            self.tissue_layout_selected_cells = set()
+            self.tissue_layout_selection_drag = None
+            self._draw_tissue_layout()
+            self.log(f"Tissue Scan layout removed {len(selected_tiles)} tiles: {names}; {len(updated['tiles'])} tiles remain. "
+                     "Remaining XYZ, ROI and row/column names are unchanged. Check the Sites selection before running.")
         except Exception as exc:
             messagebox.showerror("Scan Layout", str(exc), parent=self.tissue_layout_window)
 
@@ -980,6 +1153,8 @@ class TissueScanMixin:
             plan = validate_tissue_plan(data["plan"])
             self.tissue_layout_plan = plan
             self.tissue_layout_selected_cell = None
+            self.tissue_layout_selected_cells = None
+            self.tissue_layout_selection_drag = None
             self.tissue_layout_calibration = copy.deepcopy(data.get("calibration", {}))
             self.tissue_layout_sites = []
             self._draw_tissue_layout()
@@ -1019,6 +1194,9 @@ class TissueScanMixin:
             self.positions = generated
             self.tissue_layout_plan = plan
             self.tissue_layout_sites = list(generated)
+            self.tissue_layout_selected_cells = None
+            self.tissue_layout_selected_cell = None
+            self.tissue_layout_selection_drag = None
             self.selected_position_index = 0
             self.refresh_positions_tree()
             self.timelapse_sites_var.set("all")
@@ -1056,6 +1234,7 @@ class TissueScanMixin:
             messagebox.showerror("Scan Layout", str(exc), parent=self.tissue_layout_window)
 
     def _close_tissue_layout(self):
+        self.tissue_layout_selection_drag = None
         job = getattr(self, "tissue_layout_job", None)
         if job:
             self.after_cancel(job)

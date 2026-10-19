@@ -527,7 +527,7 @@ class UIBuilderMixin:
         grid_menu.add_command(label="52-Site Wafer Grid", command=self.open_wafer_grid_dialog)
         grid_menu.add_command(label="Dual-Die 230-Site Grid", command=self.open_dual_die_grid_dialog)
         grid_menu.add_command(label="7 x 9 Well Mesh", command=self.open_well_mesh_dialog)
-        grid_menu.add_command(label="Tissue Scan Plan (10% Overlap)", command=self.open_tissue_scan_dialog)
+        grid_menu.add_command(label="Tissue Scan Plan", command=self.open_tissue_scan_dialog)
         grid_menu.add_command(label="Scan Layout", command=self.open_tissue_layout)
         grid_menu_button.configure(menu=grid_menu)
         grid_menu_button.pack(side="right")

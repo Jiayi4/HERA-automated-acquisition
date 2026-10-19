@@ -194,10 +194,29 @@ def select_tissue_test_tiles(tiles, selected_cell):
     raise ValueError("No complete adjacent 2 x 2 block includes this tile. Select another tile.")
 
 
-def build_tissue_plan(calibration, boundaries, extra_focus=(), margin=0.05, max_tiles=10000):
-    _finite((margin,))
+def remove_tissue_tile(source, cell):
+    return remove_tissue_tiles(source, {cell})
+
+
+def remove_tissue_tiles(source, cells):
+    cells = set(cells)
+    available = {(tile["row"], tile["column"]) for tile in source["tiles"]}
+    if not cells or not cells <= available:
+        raise ValueError("Select an available tile first.")
+    if len(cells) >= len(source["tiles"]):
+        raise ValueError("Keep at least one tile in the plan.")
+    plan = copy.deepcopy(source)
+    plan["tiles"] = [tile for tile in plan["tiles"] if (tile["row"], tile["column"]) not in cells]
+    plan["focus_extrapolated_count"] = sum(tile.get("focus_extrapolated", False) for tile in plan["tiles"])
+    return plan
+
+
+def build_tissue_plan(calibration, boundaries, extra_focus=(), margin=0.05, max_tiles=10000, overlap_percent=10):
+    _finite((margin, overlap_percent))
     if not 0 <= margin <= 1:
         raise ValueError("Edge margin must be between 0 and 100% of one field.")
+    if not 0 <= overlap_percent < 100:
+        raise ValueError("Overlap must be between 0% (inclusive) and 100% (exclusive).")
     if set(boundaries) != {"Left", "Right", "Top", "Bottom"}:
         raise ValueError("Capture Left, Right, Top and Bottom boundaries first.")
     _finite(value for point in boundaries.values() for value in point if value is not None)
@@ -210,8 +229,8 @@ def build_tissue_plan(calibration, boundaries, extra_focus=(), margin=0.05, max_
     focus = [tuple(point) for point in boundaries.values() if point[2] is not None]
     focus.extend(extra_focus)
     surface = FocusSurface(focus)
-    xs = _axis_centers(left - margin, right + margin, 0.10, max_tiles)
-    ys = _axis_centers(top - margin, bottom + margin, 0.10, max_tiles)
+    xs = _axis_centers(left - margin, right + margin, overlap_percent / 100, max_tiles)
+    ys = _axis_centers(top - margin, bottom + margin, overlap_percent / 100, max_tiles)
     if len(xs) * len(ys) > max_tiles:
         raise ValueError(f"Grid has {len(xs) * len(ys)} tiles; limit is {max_tiles}. Check field calibration and boundaries.")
     tiles = []
@@ -223,7 +242,7 @@ def build_tissue_plan(calibration, boundaries, extra_focus=(), margin=0.05, max_
             tiles.append({"name": f"R{row:03d}-C{column + 1:03d}", "row": row,
                           "column": column + 1, "x": x, "y": y, "z": surface.predict(x, y),
                           "u": u, "v": v, "focus_extrapolated": not surface.contains(x, y)})
-    return {"tiles": tiles, "rows": len(ys), "columns": len(xs), "overlap_percent": 10,
+    return {"tiles": tiles, "rows": len(ys), "columns": len(xs), "overlap_percent": overlap_percent,
             "bounds": (left - margin, top - margin, right + margin, bottom + margin),
             "origin": origin, "field_right_mm": calibration.right, "field_down_mm": calibration.down,
             "focus_residual_um": surface.max_residual_um,
