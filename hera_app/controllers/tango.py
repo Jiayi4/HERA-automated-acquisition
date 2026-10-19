@@ -1,6 +1,8 @@
 import ctypes
 import os
 
+from hera_app.safety import HardwareSafetyError, finite_float
+
 
 class TangoController:
     OK_STATUS = 0
@@ -196,6 +198,11 @@ class TangoController:
         return self._get_motion_values(self.LSX_GetAccel, "Get acceleration")
 
     def apply_motion_settings(self, speed_xy, accel_xy, secure_vel_xy, speed_z=None, accel_z=None, secure_vel_z=None):
+        settings = (speed_xy, accel_xy, secure_vel_xy, speed_z, accel_z, secure_vel_z)
+        labels = ("XY speed", "XY acceleration", "XY secure velocity", "Z speed", "Z acceleration", "Z secure velocity")
+        for value, label in zip(settings, labels):
+            if value is not None and finite_float(value, label) <= 0:
+                raise HardwareSafetyError(f"{label} must be greater than zero.")
         self._require_connected()
         cur_vel = self.get_velocity()
         cur_accel = self.get_acceleration()
@@ -217,6 +224,8 @@ class TangoController:
         )
 
     def move_absolute_xy(self, x, y):
+        x = finite_float(x, "Target X")
+        y = finite_float(y, "Target Y")
         self._require_connected()
         _, _, z, a = self.get_position()
         self.check_status(
@@ -225,6 +234,7 @@ class TangoController:
         )
 
     def move_absolute_a(self, a):
+        a = finite_float(a, "Target A")
         self._require_connected()
         x, y, z, _ = self.get_position()
         self.check_status(

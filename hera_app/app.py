@@ -172,6 +172,8 @@ class HeraTriggerApp(
         self.last_export_path = ""
         self.last_export_paths = {}
         self.last_acquisition_error = ""
+        self.last_acquisition_exception = None
+        self.helper_recovery_error = None
         self.trigger_log = []
         self.dll_path_var = tk.StringVar(value=HeraController.default_dll_path())
         self.env_var = tk.StringVar(value=HeraController.get_hera_devices_path() or "")
@@ -372,6 +374,7 @@ class HeraTriggerApp(
         self.micro_z_poll_job = None
         self.micro_z_poll_inflight = False
         self.micro_z_request_lock = threading.Lock()
+        self.micro_z_stop_generation = 0
         self.micro_z_poll_interval_ms = 2000
         self.z_last_value = None
         self.z_last_status = "disconnected"

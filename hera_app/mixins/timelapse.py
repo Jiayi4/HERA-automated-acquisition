@@ -6,6 +6,8 @@ import threading
 import time
 from datetime import datetime, timedelta
 
+from hera_app.safety import HardwareSafetyError, finite_float
+
 
 class TimelapseStopped(Exception):
     pass
@@ -341,6 +343,15 @@ class TimelapseMixin:
                 return True
             except Exception as exc:
                 self._log_async(f"Could not kill helper service acquisition during timelapse stop/timeout: {exc}")
+                self.helper_recovery_error = HardwareSafetyError(f"Helper exit is unconfirmed: {exc}")
+                self.last_acquisition_exception = self.helper_recovery_error
+                self.last_acquisition_error = str(self.helper_recovery_error)
+                self.acquisition_success = False
+                self.helper_acquisition_request_id = None
+                self.hera_service_acquisition_inflight = False
+                self._set_acquisition_inflight(False)
+                self.acquisition_done_event.set()
+                return False
 
         helper_process = getattr(self, "helper_acquisition_process", None)
         if helper_process and helper_process.poll() is None:
@@ -639,6 +650,22 @@ class TimelapseMixin:
             "Timelapse paused; this sample was not skipped. Free disk space, then press Resume to retry the same site."
         )
 
+    def _pause_timelapse_for_safety(self, position, cycle_index, error_text):
+        self.timelapse_pause_event.set()
+
+        def update_pause_ui():
+            if not self.timelapse_stop_event.is_set():
+                self.pause_button.config(text="Resume")
+                self.timelapse_status_var.set("Timelapse: paused")
+                self.update_state("Paused")
+
+        self._safe_after(0, update_pause_ui)
+        self._set_run_progress("Paused: check hardware, then Resume", 0, mode="determinate")
+        self._log_async(
+            f"Cycle {cycle_index}: safety pause at {position.name}: {error_text}. "
+            "No acquisition will continue at this site until Resume; this sample was not skipped."
+        )
+
     def _run_site_with_retries(self, position, cycle_index):
         attempts = self._timelapse_site_retry_count() + 1
         last_error = ""
@@ -678,6 +705,12 @@ class TimelapseMixin:
                 raise
             except Exception as exc:
                 last_error = str(exc)
+                if isinstance(exc, HardwareSafetyError):
+                    self._pause_timelapse_for_safety(position, cycle_index, last_error)
+                    self._wait_while_paused()
+                    if self.timelapse_stop_event.is_set():
+                        raise TimelapseStopped("Timelapse stopped during hardware safety pause.")
+                    continue
                 if self._is_disk_full_error(exc):
                     self._pause_timelapse_for_disk_full(position, cycle_index, last_error)
                     self._wait_while_paused()
@@ -749,11 +782,16 @@ class TimelapseMixin:
             self.acquisition_success = False
             self.last_acquisition_error = reason
             self.acquisition_done_event.set()
+            if getattr(self, "helper_recovery_error", None):
+                raise self.helper_recovery_error
             raise RuntimeError(reason)
 
         if self.timelapse_stop_event.is_set() and not self.acquisition_success:
             raise TimelapseStopped("Timelapse stopped by user.")
         if not self.acquisition_success:
+            fault = getattr(self, "last_acquisition_exception", None)
+            if isinstance(fault, HardwareSafetyError):
+                raise fault
             raise RuntimeError(self.last_acquisition_error or "Hera acquisition failed.")
         return self.last_export_path
 
@@ -866,10 +904,15 @@ class TimelapseMixin:
         return target_z, "pending"
 
     def run_stage_site_acquisition(self, position, cycle_index=None):
+        self._ensure_helper_recovered()
+        finite_float(position.x, "Site X")
+        finite_float(position.y, "Site Y")
+        z_generation = getattr(self, "micro_z_stop_generation", 0)
         with self.stage_lock:
             if not self.tango or not self.tango.connected:
                 raise RuntimeError("Connect the Tango stage before running a site acquisition.")
-            self.apply_stage_motion_settings()
+            if self.apply_stage_motion_settings() is False:
+                raise HardwareSafetyError("Stage motion settings could not be applied; movement cancelled.")
             self.log(f"Moving to {position.name} ...")
             self.tango.move_absolute_xy(position.x, position.y)
             self.tango.wait_for_xy_stop(60000)
@@ -886,19 +929,24 @@ class TimelapseMixin:
             self._log_async(f"Micro-Manager Z targeting {target_z:.3f} um for {position.name}...")
             confirmed_z, z_status = self._move_z_to_position(target_z, label=f"{position.name} cycle {cycle_index or '-'}")
             if z_status != "ok":
-                raise RuntimeError(f"Could not move Z for {position.name}: {z_status}")
+                raise HardwareSafetyError(f"Could not move Z for {position.name}: {z_status}")
         elif self._timelapse_saved_z_enabled():
-            raise RuntimeError(f"Could not move Z for {position.name}: {z_status}")
+            raise HardwareSafetyError(f"Could not move Z for {position.name}: {z_status}")
         elif z_status not in ("no Z", "no saved Z", "Z auto-move disabled"):
             self._log_async(f"{z_status} for {position.name}; starting Hera acquisition without Z move.")
 
         if self.timelapse_stop_event.is_set():
             raise TimelapseStopped("Timelapse stopped before acquisition.")
 
-        dwell = float(self.stage_dwell_var.get())
+        dwell = finite_float(self.stage_dwell_var.get(), "Site dwell")
         if dwell > 0:
             self.log(f"Settling at {position.name} for {dwell:.1f} seconds after XY/Z move.")
             time.sleep(dwell)
+
+        if self.timelapse_stop_event.is_set():
+            raise TimelapseStopped("Timelapse stopped during site settling.")
+        if z_generation != getattr(self, "micro_z_stop_generation", 0):
+            raise HardwareSafetyError("Stop Z cancelled the pending site acquisition.")
 
         self.log(f"Starting Hera acquisition at {position.name}.")
         if cycle_index is None:

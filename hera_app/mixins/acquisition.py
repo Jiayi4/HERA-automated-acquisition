@@ -10,6 +10,7 @@ import time
 import uuid
 
 from hera_app.controllers import HeraController
+from hera_app.safety import HardwareSafetyError
 
 
 class AcquisitionMixin:
@@ -916,8 +917,33 @@ class AcquisitionMixin:
     def _schedule_helper_reconnect(self):
         if getattr(self, "is_closing", False):
             return
+        if getattr(self, "helper_recovery_error", None):
+            self._log_async("Hera reconnect blocked: previous helper exit is unconfirmed.")
+            return
         self.hdr_startup_default_enabled = bool(getattr(self, "acquisition_requested_hdr", False))
         self._safe_after(0, self.connect_hera)
+
+    def _ensure_helper_recovered(self):
+        client = getattr(self, "hera_service_client", None)
+        if not getattr(self, "helper_recovery_error", None) and not (client and client.recovery_required):
+            return
+        if client is None:
+            raise HardwareSafetyError("Previous Hera helper exit is unconfirmed; restart the app after checking the old process.")
+        try:
+            client.kill()
+        except Exception as exc:
+            self.helper_recovery_error = HardwareSafetyError(str(exc))
+            raise self.helper_recovery_error from exc
+        self.hera_service_client = None
+        self.helper_recovery_error = None
+        self._log_async("Previous Hera helper exit confirmed; recovery complete.")
+
+    def _helper_request_is_current(self, request):
+        return (
+            not getattr(self, "is_closing", False)
+            and getattr(self, "helper_acquisition_request_id", None) == request.get("request_id")
+            and not getattr(self, "helper_acquisition_abort_expected", False)
+        )
 
     def _timelapse_thread_active(self):
         thread = getattr(self, "timelapse_thread", None)
@@ -944,8 +970,10 @@ class AcquisitionMixin:
 
     def _helper_service_acquisition_worker(self, request):
         result = None
+        client = None
         start_time = time.perf_counter()
         try:
+            self._ensure_helper_recovered()
             if self.controller and self.controller.connected:
                 released = self._release_main_hera_connection(
                     "helper service acquisition",
@@ -961,44 +989,54 @@ class AcquisitionMixin:
             result = client.request(
                 "acquire",
                 timeout_sec=float(getattr(self, "helper_process_timeout_sec", 1200)),
-                event_callback=self._handle_helper_service_acquisition_event,
+                event_callback=lambda event: self._handle_helper_service_acquisition_event(event)
+                if self._helper_request_is_current(request) else None,
                 **request,
             )
+            if not self._helper_request_is_current(request):
+                return
             try:
                 disconnected = client.request("disconnect", timeout_sec=20.0)
                 self._log_helper_service_result("Helper acquisition disconnect", disconnected)
             except Exception as exc:
                 self._log_async(f"Helper service did not disconnect cleanly after acquisition; killing it: {exc}")
-                try:
-                    client.kill()
-                except Exception:
-                    pass
-                self.hera_service_client = None
+                client.kill()
+                if self.hera_service_client is client:
+                    self.hera_service_client = None
+            if not self._helper_request_is_current(request):
+                return
             if not result:
                 raise RuntimeError("Helper service finished without returning acquisition data.")
             self._finish_helper_acquisition_result(result, request, time.perf_counter() - start_time)
         except Exception as exc:
-            if (
-                self.last_acquisition_error == "Helper service acquisition was aborted."
-                or getattr(self, "helper_acquisition_abort_expected", False)
-            ):
+            if not self._helper_request_is_current(request):
                 self._log_async("Helper service acquisition stopped after Abort.")
                 return
+            if client is not None:
+                try:
+                    client.kill()
+                    if self.hera_service_client is client:
+                        self.hera_service_client = None
+                except Exception as cleanup_exc:
+                    exc = HardwareSafetyError(f"{exc}; helper cleanup failed: {cleanup_exc}")
+                    self.helper_recovery_error = exc
+            self.last_acquisition_exception = exc
             self.last_acquisition_error = str(exc)
             self.acquisition_success = False
             self._log_async(f"Helper service acquisition failed: {exc}")
             self._fail_run_progress("Progress: acquisition failed")
             self._safe_after(0, lambda: self.update_state("Error"))
-            self.acquisition_done_event.set()
         finally:
-            self.hera_service_acquisition_inflight = False
-            self.helper_acquisition_request_id = None
-            self._set_acquisition_inflight(False)
-            if request.get("auto_save") and self._timelapse_thread_active():
-                self._log_async("Main Hera reconnect deferred until the timelapse finishes.")
-            else:
-                self._schedule_helper_reconnect()
-            self.helper_acquisition_abort_expected = False
+            if getattr(self, "helper_acquisition_request_id", None) == request.get("request_id"):
+                self.hera_service_acquisition_inflight = False
+                self.helper_acquisition_request_id = None
+                self._set_acquisition_inflight(False)
+                if request.get("auto_save") and self._timelapse_thread_active():
+                    self._log_async("Main Hera reconnect deferred until the timelapse finishes.")
+                else:
+                    self._schedule_helper_reconnect()
+                self.helper_acquisition_abort_expected = False
+                self.acquisition_done_event.set()
 
     def _handle_helper_service_acquisition_event(self, event):
         event_name = event.get("event")
@@ -1184,7 +1222,8 @@ class AcquisitionMixin:
             self._finish_run_progress("Progress: saved")
             self.acquisition_success = True
             self.last_acquisition_error = ""
-            self.acquisition_done_event.set()
+            if not getattr(self, "hera_service_acquisition_inflight", False):
+                self.acquisition_done_event.set()
             self._safe_after(0, lambda: self.update_state("Completed"))
             return
 
@@ -1341,7 +1380,8 @@ class AcquisitionMixin:
         )
         self.acquisition_success = True
         self.last_acquisition_error = ""
-        self.acquisition_done_event.set()
+        if not getattr(self, "hera_service_acquisition_inflight", False):
+            self.acquisition_done_event.set()
 
     def _arm_and_start_acquisition(
         self,
@@ -1379,6 +1419,7 @@ class AcquisitionMixin:
         auto_save=True,
         use_camera_roi=True,
     ):
+        self._ensure_helper_recovered()
         controller_connected = bool(self.controller and self.controller.connected)
         if controller_connected:
             if not self.check_license_status(allow_cached=True):
@@ -1457,7 +1498,8 @@ class AcquisitionMixin:
         else:
             self._start_busy_progress("Preparing acquisition...")
 
-        scan_mode = self.SCAN_MODES[self.param_vars["scan_mode"].get()]
+        scan_mode_name = self.param_vars["scan_mode"].get()
+        scan_mode = self.SCAN_MODES[scan_mode_name]
         trigger_mode = self.TRIGGER_MODES[trigger_mode_name]
         averages = int(self.param_vars["averages"].get())
         stabilization = int(self.param_vars["stabilization"].get())
@@ -1467,6 +1509,7 @@ class AcquisitionMixin:
         self.acquisition_success = False
         self._clear_saved_export_paths()
         self.last_acquisition_error = ""
+        self.last_acquisition_exception = None
         self.pending_export_tag = export_tag
         self.pending_acquisition_role = acquisition_role
         self.pending_acquisition_auto_save = auto_save
@@ -1903,6 +1946,14 @@ class AcquisitionMixin:
                 self._schedule_helper_reconnect()
             except Exception as exc:
                 self.log(f"Failed to abort helper service acquisition: {exc}")
+                self.helper_recovery_error = HardwareSafetyError(f"Helper Abort could not confirm exit: {exc}")
+                self.last_acquisition_exception = self.helper_recovery_error
+                self.last_acquisition_error = str(self.helper_recovery_error)
+                self.acquisition_success = False
+                self.helper_acquisition_request_id = None
+                self.hera_service_acquisition_inflight = False
+                self._set_acquisition_inflight(False)
+                self.acquisition_done_event.set()
                 self._fail_run_progress("Progress: abort failed")
                 self.update_state("Error")
             return

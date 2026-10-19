@@ -60,6 +60,9 @@ Open the relevant mixin/controller directly before editing. Use search if a meth
 - If Micro-Manager Z is unavailable, save `dummy_z_position` (`0.000`) so XY sites remain usable.
 - Timelapse saved-Z movement is always enabled. Timelapse validates Micro-Manager Z is connected and every selected site has a real saved Z before starting. Site runs move XY first, then saved Z, then dwell, then HERA acquisition. Do not move to dummy `0.000` as an autofocus/saved-Z target.
 - Z moves must pass the configured `Safe Z` range and `Max Jump` checks. Trigger logs should keep target Z, confirmed Z, and Z delta for each site acquisition.
+- Reject non-finite motion values at UI and controller boundaries. Z arrival requires consecutive idle, in-tolerance readbacks; preserve manual 0.1 um jog commands even when below the arrival tolerance. Z safety failures pause a site sequence without consuming retries or skipping that site.
+- Do not hold the Z controller lock across a long `waitForDevice`. Use bounded state polling, allow Stop through the UI request lock, and block movement after unconfirmed Stop. Native driver calls can still block; software Stop is not a physical emergency stop.
+- NikonTI compatibility is narrowly keyed to MMCore library/name `NikonTI`/`TIZDrive`. Busy=true arrival needs in-tolerance encoder readings stable within 0.025 um over at least 0.5 s/four reads. An explicit unsupported Stop (11) can only cancel pending work and observe stationary position; do not log hardware braking success or relax checks for USB errors/other adapters.
 
 ## Hyperspectral, Export, And HyperLAB
 
@@ -87,6 +90,11 @@ Open the relevant mixin/controller directly before editing. Use search if a meth
 - Live exposure helpers are display-only: `Auto Contrast`, `Gamma`, `Show Saturation`, `Cross`, and `Snapshot` must not alter camera exposure, gain, ROI, or acquisition data.
 - `Live View HDR` is a live-preview aid, not a guaranteed hyperspectral HDR acquisition mode. Record SDK-reported raw/cube HDR flags in logs/export descriptions instead of assuming HDR cubes were saved.
 - Keep the live cursor readout compact and stable in the left Status panel.
+
+## Helper Recovery
+
+- Tie helper IPC queues/readers to a specific process session and use unique request IDs. Ignore stale results and never let an old worker clear a new acquisition's state.
+- On failure/timeout, confirm helper termination before reconnect/retry or signaling completion. Keep an unconfirmed process handle and block camera reconnection; site sequences must pause without skipping the sample. Resume verifies cleanup before movement/acquisition.
 
 ## Local-Only Hardware And Design Files
 

@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from hera_app.controllers import SavedPosition
+from hera_app.safety import finite_float
 
 
 class StageMixin:
@@ -24,9 +25,9 @@ class StageMixin:
     def apply_stage_motion_settings(self):
         if not self.tango or not self.tango.connected:
             self.log("Connect the stage before applying motion settings.")
-            return
+            return False
         try:
-            speed_xy = float(self.stage_speed_var.get())
+            speed_xy = finite_float(self.stage_speed_var.get(), "XY speed")
             if speed_xy <= 0:
                 raise RuntimeError("Stage speed must be greater than zero.")
             self.tango.apply_motion_settings(speed_xy=speed_xy, accel_xy=1.0, secure_vel_xy=50.0)
@@ -35,9 +36,11 @@ class StageMixin:
                 f"Stage motion updated: speedXY={speed_xy:.3f}, "
                 f"controllerVel=(X={velocities[0]:.3f}, Y={velocities[1]:.3f})"
             )
+            return True
         except Exception as exc:
             self.log(f"Failed to apply stage motion settings: {exc}")
             self.update_state("Error")
+            return False
 
     def update_stage_position_display(self):
         if self.tango and self.tango.connected:
@@ -1255,7 +1258,7 @@ class StageMixin:
 
     def _parse_stage_float(self, var, label):
         try:
-            return float(var.get())
+            return finite_float(var.get(), label)
         except Exception as exc:
             raise RuntimeError(f"Enter a valid {label}.") from exc
 

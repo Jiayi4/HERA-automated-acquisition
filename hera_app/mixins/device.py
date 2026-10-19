@@ -63,6 +63,10 @@ class DeviceMixin:
         return 0
 
     def connect_hera(self):
+        client = getattr(self, "hera_service_client", None)
+        if getattr(self, "helper_recovery_error", None) or (client and client.recovery_required):
+            self.log("Hera connection blocked: previous helper exit is unconfirmed. Recover the helper before reconnecting.")
+            return
         if self.controller and self.controller.connected:
             self.log("Hera is already connected.")
             return
@@ -102,7 +106,7 @@ class DeviceMixin:
 
     def _get_hera_service_client(self):
         client = getattr(self, "hera_service_client", None)
-        if client and client.is_running():
+        if client and (client.is_running() or client.recovery_required):
             return client
         client = HeraServiceClient(log_func=lambda message: self._log_async(message))
         self.hera_service_client = client
