@@ -88,6 +88,17 @@ Important mixins:
 - `Sampling` can be `Uniform lambda` or `Uniform nu` when supported by the installed SDK.
 - Unsupported or read-only settings are logged instead of silently ignored.
 
+### Control Bar Presets
+
+Choose a `Preset` and click `Load`, then click the existing `Set` button to apply it to Hera. Loading alone updates the fields without interrupting Live View. Built-in presets:
+
+| Preset | Spectral | Bands | Avg | Bin | Sampling | Data |
+| --- | --- | --- | --- | --- | --- | --- |
+| Fluo | Medium | 200 | 2 | None | Uniform lambda | SinglePrecision |
+| BF | Extra High | 1500 | 2 | 4x | Uniform lambda | SinglePrecision |
+
+To keep a different combination, edit the six Control Bar fields, click `Save`, and enter a preset name. Saving an existing name asks before replacing it. Presets persist across restarts in `local/control_bar_presets.json` inside the repository; this local file is excluded from Git and independent of the output folder. Exposure, gain, HDR, ROI, sites and reference data are not included or changed. Loading is blocked during acquisition, processing, parameter application or an active site loop/timelapse (including Pause).
+
 ## ROI
 
 ROI can be selected in Live View or entered as width/height. `Apply Box` uses the corner fields, `Square` makes a square ROI, and `Clear` returns to full-frame workflow.
@@ -125,13 +136,15 @@ Capture the calibration points while the well center is on the Cross; do not man
 
 The app checks that the calibration spans are approximately 2.4 mm from `R1-C1` to `R1-C9` and 1.8 mm from `R1-C1` to `R7-C1`, then stores the fixed ROI with every site and orders the sites in a serpentine scan. Recalibrate after changing the ROI or Cross position, repositioning or rotating the sample, changing the Tango origin, or changing the optical alignment that produced the Y offset.
 
-### Tissue Scan Plan With 10% Overlap
+### Tissue Scan Plan
 
-Open `Stage > Saved Sites > Grid > Tissue Scan Plan (10% Overlap)` after applying a fixed ROI and starting Live View. The window has three steps:
+Open `Stage > Saved Sites > Grid > Tissue Scan Plan` after applying a fixed ROI and starting Live View. The window has three steps:
 
 1. **Field Calibration:** choose a clear landmark that stays visible while moving the stage. Click `Pick A`, then click the landmark in Live View near the image center. Move the stage so the same landmark appears near a side of the image, click `Pick B`, and click it again. Move it in a different direction (for example toward the bottom), then use `Pick C`. Keep the stage stopped for each click and separate captures by at least 15% of the field. The app calculates both Stage XY field vectors, including direction and rotation, and maps preview pixels back to the actual ROI. Use a profile name identifying the objective and magnification, then `Save Calibration` for reuse with unchanged optics, ROI and binning.
 2. **Tissue & Focus:** the Cross is reset to the center. Move the leftmost, rightmost, topmost and bottommost tissue boundaries onto this fixed Cross and use the corresponding `Capture`. Left/right/top/bottom refer to the Live View image directions, even when they differ from the Stage axes. With `Capture focused Z` checked, focus the tissue before each Capture; the app records XYZ together. If there is nothing to focus on at an edge, uncheck it to record XY only, then add focused positions within the tissue using `Add Focus Point`. At least three non-collinear real focus readings are needed. Add a center focus point and points at visible tissue height changes. The default edge margin is 5% of one FOV on each side.
-3. **Preview:** click `Preview Grid`. Adjacent centers are spaced by 90% of the calibrated field width/height, giving nominal 10% overlap in both directions. The rectangular grid covers the selected tissue bounds with the fixed ROI, including edge tiles, and follows a serpentine path. Click a tile to inspect its XYZ and use `Go To Tile` to check its initial focus. The preview reports tiles beyond the area covered by the measured focus points; those Z values need particular attention. `Generate Saved Sites` replaces the current table after confirmation when it is nonempty.
+3. **Preview:** set `Overlap [%]` in Tissue & Focus, then click `Preview Grid`. The default is 10%; values from 0% up to (but not including) 100% are accepted, including decimals. Adjacent centers are spaced by `FOV * (1 - overlap / 100)` in both calibrated directions. Very high overlap can exceed the 10,000-tile safety limit. The rectangular grid covers the selected tissue bounds with the fixed ROI, including edge tiles, and follows a serpentine path. Click a tile to inspect its XYZ and use `Go To Tile` to check its initial focus. The preview reports tiles beyond the area covered by the measured focus points; those Z values need particular attention. `Generate Saved Sites` replaces the current table after confirmation when it is nonempty.
+
+To exclude empty or unwanted areas, select tiles and click `Delete Tiles`, then confirm once. A normal click selects one tile. Hold Ctrl and click to add/remove individual tiles; drag a box to select tiles whose centers fall inside it, or Ctrl-drag to add a box to the existing selection. Selected tiles are highlighted and the selected count is shown. Remaining tiles keep their XYZ, row/column labels and serpentine order; the tile count and focus warning count update. Keep at least one tile. Selection is cleared after deletion; Go To is available only for a single selected tile. `Export Plan` and `Generate Saved Sites` use only the remaining preview tiles. Changing overlap or edge margin requires a new `Preview Grid`; regeneration creates a fresh complete grid, restoring previously deleted preview tiles. Preview edits do not change already-generated Saved Sites until you generate them again.
 
 Initial Z uses a fitted tilt plane with inverse-distance interpolation of the measured focus residuals. It preserves each measured focus value and can follow sampled local height changes, but is not autofocus and cannot detect unsampled bumps. After generation, use Saved Sites `Go To` and `Update` to refine any tile focus, then export the final table as CSV. Choose the desired data products and use `Run One Loop` to acquire the tissue once.
 
@@ -140,6 +153,8 @@ Initial Z uses a fitted tilt plane with inverse-distance interpolation of the me
 Generating tissue sites also opens `Scan Layout`. Reopen it from `Stage > Saved Sites > Grid > Scan Layout`. The layout stays available independently of the calibration window, including while `Run One Loop` or `Run Timelapse` runs. An orange outline marks the site reported in Run Status, and a green outline shows the current fixed-ROI footprint from the latest Stage XY readback. The footer displays site, app state and reported XY. It reuses existing position polling without extra hardware queries; readback may lag during stage movement. A different ROI/orientation or disconnected stage suppresses the green footprint and displays a notice. Closing the layout cancels its UI refresh timer.
 
 Click a tile in `Scan Layout` to select it (blue outline) and inspect its saved XYZ. Clicking does not move hardware. After generating/restoring Saved Sites, press `Go To` to move to that tile's saved XY/Z and restore its ROI. Once the stage is stopped, adjust focus with the existing Z controls and click `Update Z`. It reads a real Z in the background and updates only that tile's Z and real-Z flag, keeping XY and ROI unchanged. Update is rejected if the stage is not at the selected tile, moves during the read, or returns an unsafe Z. Use `Save Plan` to retain the correction. Go To, Z update and trial scan actions are blocked while acquisition or a site sequence is running.
+
+`Scan Layout > Delete Tiles` supports the same Ctrl-click and box selection and removes all selected tiles in one operation. When generated/restored in this session, their associated Saved Sites are also removed. A loaded plan that has not generated sites does not delete unrelated table entries, even when names match. Manual corrections to remaining associated sites are retained. Numbered `Sites` selections are remapped to the same surviving sites; if none of the selected sites remain, the field becomes `none` and you must select sites again before running. Use `Save Plan` to persist deletions; loading the saved file and using `Generate Sites` will not restore excluded tiles. Go To, Update Z and Run 2x2 Test require a single selected tile. Deletion is blocked during acquisition, site sequences, position reads or Z updates. Deleted areas are intentionally no longer covered by the scan.
 
 For a stitching check, select a tile and click `Run 2x2 Test`. The app finds a complete adjacent 2 x 2 block containing that tile, using inward neighbors at grid edges when necessary, and runs those four Saved Sites once in their existing serpentine order. It uses the normal output folder, selected export products, saved-Z checks, dwell, retries and stop/pause controls. The right-side `Sites` selection is not changed, so a subsequent normal `Run One Loop` still uses the original selection. The trial is unavailable if no complete neighboring block exists or the tiles have not been generated/restored into Saved Sites.
 
@@ -151,7 +166,19 @@ Reuse absolute XYZ only when the specimen position and Stage origin are unchange
 
 Changing ROI, live-frame geometry or binning invalidates the current setup. Recalibrate after changing objective or magnification. A saved field calibration can be reused for another tissue with unchanged optics, but capture new boundaries and focus points after repositioning the specimen. The well-mesh `-0.018 mm` Y offset does not apply to Tissue Scan.
 
-Before a full scan, acquire a small 2 x 2 area and check the actual saved-image overlap and orientation. The specified 10% is nominal; positioning/calibration error still needs to be checked on hardware. Tissue capture and generation messages appear in `hera_background_status.log` with the prefix `Tissue Scan`.
+Before a full scan, acquire a small 2 x 2 area and check the actual saved-image overlap and orientation. The selected overlap percentage is nominal; positioning/calibration error still needs to be checked on hardware. Tissue capture and generation messages appear in `hera_background_status.log` with the prefix `Tissue Scan`.
+
+### Live View Detail
+
+With NumPy installed, Live View retains every spatial pixel returned by the SDK instead of reducing full frames to a 480-pixel preview. `Fit` fits the whole image into the window; `1:1` displays one source pixel per Tk image pixel. Use the zoom buttons or wheel and right-button drag to inspect other areas. At high zoom only the visible viewport is rendered. Preview updates are throttled to at most 10 per second; skipped SDK frame handles are still released.
+
+With NumPy, the latest SDK frame is copied into an owned raw-intensity buffer. The display ROI is selected first; Auto Contrast uses its original-precision min/max, Gamma acts on that mapping, and only the final image is quantized to 8-bit. This preserves low-signal 12/16-bit variations that would otherwise be lost by reducing to 8-bit before contrast stretching. Auto still uses min/max (not percentiles); resizing and HDR switching behavior are unchanged. With Auto off, the SDK-derived effective bit depth supplies the fixed display range. Constant-valued frames use that same fixed range rather than dividing by zero. Saturation highlighting still compares raw pixels with the SDK threshold. The horizontal/vertical profiles retain their existing fixed 8-bit intensity scale and are not Auto/Gamma-stretched.
+
+This changes only Live display and `Snap`, not camera exposure, binning, hyperspectral acquisition, saved cube data, or Tissue Scan coordinates. `Snap` uses the same original-precision mapping and saves a full-spatial-resolution 8-bit RGB PNG of the active ROI, not raw 12/16-bit data. Without NumPy, the old reduced-resolution/8-bit compatibility preview remains available and `1:1` is unavailable. The background log records `Live preview intensity mapping: raw range=..., display range=...; Auto/Gamma applied before 8-bit conversion` for the first rendered frame of a Live session. The separate `Live profile 8-bit range` log describes the fixed-scale profiles, not the raw-precision display contrast range.
+
+After Live starts or the HDR setting changes, the status shows `HDR verifying` until at least three consecutive processed frames report the requested SDK HDR flag across a stable window of at least 0.5 seconds. A first-frame disagreement is recorded as a pending detail, not an immediate warning. Successful confirmation logs `Live HDR verified`, with `(recovered)` if an earlier flag disagreed or was unavailable. While frames continue arriving, an unresolved verification lasting five seconds produces one `Live HDR verification warning` and shows `HDR mismatch` or `HDR unverified`; unavailable flags are never assumed to mean off. Later recovery is logged, and a new disagreement after verification starts another verification window. Restarting/stopping Live resets this state. This uses the existing frame-level SDK readback without extra camera configuration or polling calls; it verifies Live flags only, not the HDR status of a hyperspectral acquisition, which must still be checked using `dataHDR`/`cubeHDR`.
+
+Saved Tissue Scan field calibrations remain reusable across the preview-resolution upgrade when optics, ROI, rotation and binning are unchanged. Confirm unchanged optics when loading; a different objective or magnification still requires recalibration.
 
 Enabling `Cross` places it at the center pixel of the current live image. Click within Live View to pin it elsewhere, or use `Center` to restore the current full-frame/ROI image center.
 
@@ -192,6 +219,10 @@ With a compatible flatfield:
 - `_nrm` saves sample divided by reference.
 
 Export choices are independent of the current display mode.
+
+Helper direct-save (used by compatible `Run One Loop`/timelapse acquisitions) uses NumPy for blocked normalization when available. It retains the previous float64 `sample / ref` calculation, writes float32 BSQ, and writes zero when `abs(ref) <= 1e-12` or the reference is NaN. SDK acquisition, ROI alignment, wavelength order and ENVI metadata are unchanged. Reusable block buffers avoid copying entire SDK bands or loading a whole reference cube; the reference file is opened once per export. `_ref` also uses block reads/writes without converting its bytes. Incomplete references are rejected and temporary output cleanup remains enabled on failure. Without NumPy, the Python normalization fallback remains available.
+
+After restarting the app, run a small scan with the same ROI/bands/reference and `_nrm` selected. In `hera_background_status.log`, check `Helper normalized export: NumPy float64 division -> float32 BSQ` and compare the `direct_save` value in `Helper performance timing`. This optimization targets normalization/saving, not the SDK acquisition or hypercube computing time.
 
 ## Export, HyperLAB, And Logs
 
