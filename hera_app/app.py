@@ -148,6 +148,7 @@ class HeraTriggerApp(
         self.hera_disconnect_lock = threading.Lock()
         self.stage_lock = threading.Lock()
         self.live_frame_lock = threading.Lock()
+        self.live_decode_lock = threading.Lock()
         self.hypercube_read_lock = threading.Lock()
         self.parameter_apply_lock = threading.Lock()
         self.app_state = self.STATE_LABELS["Idle"]
@@ -219,9 +220,11 @@ class HeraTriggerApp(
         self.live_photo = None
         self.live_frame_info = None
         self.latest_live_frame = None
+        self.latest_live_raw_frame = None
         self.latest_live_profile = None
         self.latest_live_is_hdr = None
         self.latest_live_mode_text = "unknown"
+        self.live_hdr_verification = None
         self.live_hdr_requested = False
         self.live_autocontrast_var = tk.BooleanVar(value=True)
         self.live_show_saturation_var = tk.BooleanVar(value=True)
@@ -287,7 +290,9 @@ class HeraTriggerApp(
         self.hera_service_acquisition_inflight = False
         self.hera_disconnect_inflight = False
         self.hdr_pixel_format_diagnostics_enabled = False
-        self.live_max_preview_width = 480
+        self.live_max_preview_width = 0
+        self.live_native_pixel_view = False
+        self.last_live_decode_time = 0.0
         self.live_display_rotation_degrees = 90
         self.live_auth_warning_logged = False
         self.last_live_decode_error = ""
@@ -664,6 +669,8 @@ class HeraTriggerApp(
         detail_prefixes = (
             "first live frame received:",
             "live preview auto-contrast",
+            "live preview intensity mapping",
+            "live profile 8-bit range",
             "live saturation threshold",
             "live preview rendered successfully",
             "supported live pixel formats",

@@ -9,8 +9,17 @@ from base64 import b64encode
 from tkinter import filedialog
 from datetime import datetime
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 
 class LiveViewMixin:
+    LIVE_HDR_CONFIRM_FRAMES = 3
+    LIVE_HDR_CONFIRM_SECONDS = 0.5
+    LIVE_HDR_VERIFY_TIMEOUT_SECONDS = 5.0
+
     def start_live_view(self):
         if not self.controller or not self.controller.connected:
             return
@@ -53,11 +62,13 @@ class LiveViewMixin:
                 )
                 self._set_live_view_status("Live view: no supported pixel format")
                 return
-            self.live_accept_frames = True
-            self.controller.start_live_capture(pixel_format=selected_format)
             self.latest_live_is_hdr = None
+            self.latest_live_mode_text = "HDR verifying"
+            self.live_hdr_verification = None
             self.live_first_frame_logged = False
             self.live_first_frame_rendered = False
+            self.live_accept_frames = True
+            self.controller.start_live_capture(pixel_format=selected_format)
             mode_note = self.hdr_mode_text(live_hdr_mode, short=True)
             if hdr_requested and not live_hdr_mode:
                 mode_note = f"{mode_note} fallback"
@@ -112,6 +123,7 @@ class LiveViewMixin:
     def _clear_live_view_frame_state(self):
         with self.live_frame_lock:
             self.latest_live_frame = None
+            self.latest_live_raw_frame = None
             self.latest_live_profile = None
             self.live_frame_info = None
             self.live_display_rect = None
@@ -119,6 +131,11 @@ class LiveViewMixin:
             self.live_cursor_image_xy = None
             self.live_render_pending = False
             self.last_live_render_time = 0.0
+            self.last_live_decode_time = 0.0
+            self.live_hdr_verification = None
+            self.latest_live_is_hdr = None
+            self.latest_live_mode_text = "unknown"
+        self.live_display_intensity_mapping = None
         self.live_photo = None
         self.live_cross_point = None
         self.live_profile_status_var.set("Cross: waiting for frame" if self.live_cross_enabled_var.get() else "Cross: off")
@@ -172,9 +189,17 @@ class LiveViewMixin:
             self._log_async(f"Live capture buffer warning: free buffers={free_buffers}")
 
     def on_live_capture_frame(self, capture_handle):
+        decoding = False
         try:
             if self.is_closing or not getattr(self, "live_accept_frames", False):
                 return
+            decoding = self.live_decode_lock.acquire(blocking=False)
+            if not decoding:
+                return
+            now = time.monotonic()
+            if self.latest_live_frame is not None and now - self.last_live_decode_time < self.live_render_interval_sec:
+                return
+            self.last_live_decode_time = now
             info = self.controller.get_live_capture_info(capture_handle)
             live_is_hdr = None
             try:
@@ -211,7 +236,6 @@ class LiveViewMixin:
                 saturation_threshold,
                 scale,
             )
-            _, preview_min, preview_max = self._normalize_grayscale_for_display(display_bytes)
             threshold_display = self._display_saturation_threshold(saturation_threshold, bit_depth, bits_per_pixel)
             if live_is_hdr is None:
                 live_hdr_text = "unknown"
@@ -219,6 +243,7 @@ class LiveViewMixin:
                 live_hdr_text = self.hdr_mode_text(live_is_hdr, short=True)
             requested_hdr = bool(getattr(self, "live_hdr_requested", False))
             requested_mode_text = self.hdr_mode_text(requested_hdr, short=True)
+            self._update_live_hdr_verification(live_is_hdr, requested_hdr, now)
             live_mode_text = self._live_frame_mode_text(
                 live_is_hdr,
                 requested_hdr,
@@ -227,14 +252,26 @@ class LiveViewMixin:
                 saturation_threshold,
             )
 
+            frame = (disp_width, disp_height, display_bytes, saturation_mask)
+            raw_frame = None
+            if np is not None and bytes_per_pixel in (1, 2, 4):
+                raw_frame = {
+                    "frame": frame,
+                    "pixels": self._live_raw_sample_view(raw_buffer, width, height, row_stride, bytes_per_pixel, scale),
+                    "frame_width": width, "frame_height": height,
+                    "bit_depth": bit_depth, "bits_per_pixel": bits_per_pixel,
+                    "saturation_threshold": saturation_threshold,
+                }
             with self.live_frame_lock:
                 self.live_frame_info = (width, height, bit_depth, bits_per_pixel)
-                self.latest_live_frame = (disp_width, disp_height, display_bytes, saturation_mask)
+                self.latest_live_frame = frame
+                self.latest_live_raw_frame = raw_frame
                 self.latest_live_profile = (disp_width, disp_height, display_bytes, threshold_display)
                 self.latest_live_is_hdr = live_is_hdr
                 self.latest_live_mode_text = live_mode_text
             self._set_live_view_status(f"Live view: receiving {self.live_pixel_format_name}, {live_mode_text}")
             if not self.live_first_frame_logged:
+                _, preview_min, preview_max = self._normalize_grayscale_for_display(display_bytes)
                 self.live_first_frame_logged = True
                 if self.live_watchdog_job:
                     try:
@@ -248,15 +285,11 @@ class LiveViewMixin:
                     f"liveMode={live_mode_text}, sdkLiveFlagMode={live_hdr_text}, requestedMode={requested_mode_text}",
                     detail=True,
                 )
-                if live_is_hdr is not None and live_is_hdr != requested_hdr:
-                    self._log_async(
-                        "Live HDR readback mismatch: "
-                        f"checkbox requested {requested_mode_text}, "
-                        f"but HeraAPI_GetLiveCaptureIsHDR reports {live_hdr_text}. "
-                        "The SDK live-capture HDR flag is used as the displayed mode. "
-                        f"format={self.live_pixel_format_name}, saturation_threshold={saturation_threshold}.",
-                    )
-                self._log_async(f"Live preview auto-contrast range: min={preview_min}, max={preview_max}", detail=True)
+                self._log_async(f"Live profile 8-bit range (before display contrast): min={preview_min}, max={preview_max}", detail=True)
+                self._log_async(f"Live preview source: {disp_width}x{disp_height}, sampling={scale}x; "
+                                + ("native spatial resolution." if scale == 1 else "reduced-resolution preview."), detail=True)
+                if np is None:
+                    self._log_async("NumPy is unavailable; Live View uses a reduced-resolution compatibility preview.")
                 self._log_async(
                     f"Live saturation threshold from SDK: {saturation_threshold} (display scale: {threshold_display})",
                     detail=True,
@@ -273,6 +306,8 @@ class LiveViewMixin:
                 self.last_live_decode_error = error_text
                 self._log_async(f"Live frame decode failed: {error_text}")
         finally:
+            if decoding:
+                self.live_decode_lock.release()
             try:
                 self.controller.release_live_capture_result(capture_handle)
             except Exception:
@@ -406,11 +441,36 @@ class LiveViewMixin:
             self.live_pan_y = max(-max_pan_y, min(max_pan_y, self.live_pan_y))
 
     def _update_live_zoom_label(self):
-        self.live_zoom_label_var.set(f"Zoom {int(round(self.live_zoom_factor * 100))}%")
+        self.live_zoom_label_var.set("1:1" if getattr(self, "live_native_pixel_view", False)
+                                     else f"Zoom {int(round(self.live_zoom_factor * 100))}%")
+
+    def _live_native_zoom_factor(self):
+        with self.live_frame_lock:
+            size = self.live_display_frame_size
+        if not size or not hasattr(self, "live_view_canvas"):
+            return None
+        width, height = self._live_display_dimensions(*size)
+        base_w, _ = self._fit_dimensions(width, height, max(self.live_view_canvas.winfo_width() - 16, 1),
+                                        max(self.live_view_canvas.winfo_height() - 16, 1))
+        return width / base_w
+
+    def show_live_native_resolution(self):
+        if np is None:
+            self.log("Install NumPy to enable native-resolution Live View.")
+            return
+        factor = self._live_native_zoom_factor()
+        if factor is None:
+            return
+        self.live_native_pixel_view = True
+        self.live_zoom_factor = factor
+        self.live_pan_x = self.live_pan_y = 0.0
+        self._update_live_zoom_label()
+        self._schedule_live_render(force=True)
 
     def zoom_live_view(self, factor, event=None):
         old_zoom = self.live_zoom_factor
-        new_zoom = max(1.0, min(8.0, old_zoom * factor))
+        native_factor = self._live_native_zoom_factor() or 1.0
+        new_zoom = max(min(1.0, native_factor), min(max(8.0, native_factor), old_zoom * factor))
         if abs(new_zoom - old_zoom) < 0.001:
             return
 
@@ -442,10 +502,12 @@ class LiveViewMixin:
                     self._clamp_live_pan(canvas_width, canvas_height, new_w, new_h)
 
         self.live_zoom_factor = new_zoom
+        self.live_native_pixel_view = False
         self._update_live_zoom_label()
         self._schedule_live_render(force=True)
 
     def fit_live_view(self):
+        self.live_native_pixel_view = False
         self.live_zoom_factor = 1.0
         self.live_pan_x = 0.0
         self.live_pan_y = 0.0
@@ -460,6 +522,7 @@ class LiveViewMixin:
         if not roi_rect:
             return
         self.live_view_crop_roi = roi_rect
+        self.live_native_pixel_view = False
         self.live_zoom_factor = 1.0
         self.live_pan_x = 0.0
         self.live_pan_y = 0.0
@@ -518,7 +581,8 @@ class LiveViewMixin:
         self.live_pan_drag_start = None
 
     def _live_preview_scale(self, width):
-        target_w = min(width, self.live_max_preview_width)
+        limit = self.live_max_preview_width or (480 if np is None else width)
+        target_w = min(width, limit)
         return max(1, math.ceil(width / target_w))
 
     def _display_saturation_threshold(self, saturation_threshold, bit_depth, bits_per_pixel):
@@ -549,7 +613,71 @@ class LiveViewMixin:
             return storage_depth
         return effective_depth
 
+    def _update_live_hdr_verification(self, live_is_hdr, requested_hdr, now):
+        state = getattr(self, "live_hdr_verification", None)
+        if state is None or state["requested"] != requested_hdr:
+            state = {"requested": requested_hdr, "phase": "verifying", "started": now,
+                     "matches": 0, "matched_since": None, "warned": False, "transition_seen": False}
+            self.live_hdr_verification = state
+        if live_is_hdr is requested_hdr:
+            if state["matches"] == 0:
+                state["matched_since"] = now
+            state["matches"] += 1
+            if state["matches"] >= self.LIVE_HDR_CONFIRM_FRAMES and \
+                    now - state["matched_since"] >= self.LIVE_HDR_CONFIRM_SECONDS:
+                if state["phase"] != "verified":
+                    recovered = " (recovered)" if state["transition_seen"] else ""
+                    self._log_async(
+                        f"Live HDR verified{recovered}: requested={self.hdr_mode_text(requested_hdr, short=True)}, "
+                        f"frameHDR={live_is_hdr}, consecutive frames={state['matches']}, "
+                        f"stable window={now - state['matched_since']:.2f} s. "
+                        "This verifies Live frames only; hyperspectral acquisition uses dataHDR/cubeHDR."
+                    )
+                state["phase"] = "verified"
+                state["warned"] = False
+                state["transition_seen"] = False
+            else:
+                state["phase"] = "verifying"
+            return
+
+        if state["phase"] == "verified":
+            state["started"] = now
+            state["warned"] = False
+        state["matches"] = 0
+        state["matched_since"] = None
+        if not state["transition_seen"]:
+            state["started"] = now
+            self._log_async(
+                f"Live HDR verification pending: requested={self.hdr_mode_text(requested_hdr, short=True)}, "
+                f"frameHDR={live_is_hdr}. Waiting for stable consecutive frames.", detail=True,
+            )
+        state["transition_seen"] = True
+        elapsed = now - state["started"]
+        if elapsed < self.LIVE_HDR_VERIFY_TIMEOUT_SECONDS:
+            state["phase"] = "verifying"
+            return
+        state["phase"] = "unknown" if live_is_hdr is None else "mismatch"
+        if not state["warned"]:
+            issue = "flag unavailable" if live_is_hdr is None else "persistent mismatch"
+            self._log_async(
+                f"Live HDR verification warning: {issue} after {elapsed:.1f} s; "
+                f"requested={self.hdr_mode_text(requested_hdr, short=True)}, frameHDR={live_is_hdr}, "
+                f"format={self.live_pixel_format_name}. Live HDR is not verified; "
+                "image brightness is not proof of HDR. Check dataHDR/cubeHDR for hyperspectral acquisitions."
+            )
+            state["warned"] = True
+
     def _live_frame_mode_text(self, live_is_hdr, requested_hdr, bit_depth, bits_per_pixel, saturation_threshold):
+        state = getattr(self, "live_hdr_verification", None)
+        if state is not None and state["requested"] == requested_hdr:
+            frame_flag = "unknown" if live_is_hdr is None else ("on" if live_is_hdr else "off")
+            if state["phase"] == "verifying":
+                return f"HDR verifying (frame {frame_flag})"
+            if state["phase"] == "mismatch":
+                return f"HDR mismatch (frame {frame_flag})"
+            if state["phase"] == "unknown":
+                return "HDR unverified (flag unavailable)"
+            return f"{self.hdr_mode_text(live_is_hdr, short=True)} (verified)"
         if live_is_hdr is True:
             return self.hdr_mode_text(True, short=True)
         if live_is_hdr is False:
@@ -558,7 +686,27 @@ class LiveViewMixin:
             return f"{self.hdr_mode_text(True, short=True)} (flag unknown)"
         return "unknown"
 
+    def _live_raw_sample_view(self, raw_buffer, width, height, row_stride, bytes_per_pixel, scale):
+        if width <= 0 or height <= 0 or scale <= 0 or row_stride < width * bytes_per_pixel:
+            raise ValueError("Invalid live frame dimensions or row stride.")
+        return np.ndarray((height, width), dtype=np.dtype(f"<u{bytes_per_pixel}"),
+                          buffer=raw_buffer, strides=(row_stride, bytes_per_pixel))[::scale, ::scale]
+
     def _extract_live_preview_bytes(self, raw_buffer, width, height, row_stride, bytes_per_pixel, bit_depth, bits_per_pixel, saturation_threshold, scale):
+        if np is not None and bytes_per_pixel in (1, 2, 4):
+            samples = self._live_raw_sample_view(raw_buffer, width, height, row_stride, bytes_per_pixel, scale)
+            threshold = int(saturation_threshold or 0)
+            mask = (samples >= threshold).astype(np.uint8) if threshold > 0 else np.zeros(samples.shape, dtype=np.uint8)
+            if bytes_per_pixel == 1:
+                gray = samples
+            elif bytes_per_pixel == 2:
+                depth = self._live_effective_display_depth(bit_depth, bits_per_pixel, threshold)
+                gray = np.minimum(samples >> max(depth - 8, 0), 255).astype(np.uint8)
+            else:
+                depth = self._live_effective_display_depth(bit_depth, bits_per_pixel, threshold)
+                maximum = float((1 << depth) - 1) if depth > 0 else 65535.0
+                gray = np.clip(np.rint(samples.astype(np.float64) * (255.0 / maximum)), 0, 255).astype(np.uint8)
+            return gray.tobytes(), gray.shape[1], gray.shape[0], mask.tobytes()
         display_width = max(1, math.ceil(width / scale))
         display_height = max(1, math.ceil(height / scale))
         pixel_row_bytes = width * bytes_per_pixel
@@ -623,6 +771,11 @@ class LiveViewMixin:
     def _resample_grayscale_nearest(self, src_bytes, src_width, src_height, dst_width, dst_height):
         if (src_width, src_height) == (dst_width, dst_height):
             return src_bytes
+        if np is not None:
+            source = np.frombuffer(src_bytes, dtype=np.uint8, count=src_width * src_height).reshape(src_height, src_width)
+            xs = np.arange(dst_width, dtype=np.int64) * src_width // dst_width
+            ys = np.arange(dst_height, dtype=np.int64) * src_height // dst_height
+            return source[ys[:, None], xs].tobytes()
         x_map = [min(src_width - 1, int(x * src_width / dst_width)) for x in range(dst_width)]
         result = bytearray(dst_width * dst_height)
         dst_offset = 0
@@ -633,6 +786,33 @@ class LiveViewMixin:
             result[dst_offset:dst_offset + dst_width] = bytes(src_row[x] for x in x_map)
             dst_offset += dst_width
         return bytes(result)
+
+    def _sample_live_viewport(self, source_bytes, source_width, source_height, output_width, output_height, bounds):
+        x0, y0, x1, y1 = bounds
+        if np is not None:
+            source = np.frombuffer(source_bytes, dtype=np.uint8, count=source_width * source_height).reshape(source_height, source_width)
+            xs = np.arange(x0, x1, dtype=np.int64) * source_width // output_width
+            ys = np.arange(y0, y1, dtype=np.int64) * source_height // output_height
+            return source[ys[:, None], xs].tobytes()
+        xs = [x * source_width // output_width for x in range(x0, x1)]
+        rows = []
+        for y in range(y0, y1):
+            row = y * source_height // output_height * source_width
+            rows.append(bytes(source_bytes[row + x] for x in xs))
+        return b"".join(rows)
+
+    def _make_live_viewport_photo(self, gray_bytes, mask, source_width, source_height, output_width, output_height,
+                                  canvas_width, canvas_height, left, top):
+        x0, y0 = max(0, int(math.floor(-left))), max(0, int(math.floor(-top)))
+        x1 = min(output_width, int(math.ceil(canvas_width - left)))
+        y1 = min(output_height, int(math.ceil(canvas_height - top)))
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError("Live image viewport is outside the canvas.")
+        bounds = (x0, y0, x1, y1)
+        visible = self._sample_live_viewport(gray_bytes, source_width, source_height, output_width, output_height, bounds)
+        visible_mask = self._sample_live_viewport(mask, source_width, source_height, output_width, output_height, bounds) if mask else None
+        photo, _, _ = self._make_ppm_photo_from_grayscale(visible, x1 - x0, y1 - y0, x1 - x0, y1 - y0, visible_mask)
+        return photo, left + x0, top + y0
 
     def _get_live_display_rotation(self):
         try:
@@ -651,6 +831,9 @@ class LiveViewMixin:
         expected_len = src_width * src_height
         if not src_bytes or src_width <= 0 or src_height <= 0 or len(src_bytes) < expected_len:
             return src_bytes
+        if np is not None:
+            source = np.frombuffer(src_bytes, dtype=np.uint8, count=expected_len).reshape(src_height, src_width)
+            return np.rot90(source, -1).tobytes()
         dst_width = src_height
         dst = bytearray(expected_len)
         for src_y in range(src_height):
@@ -664,6 +847,9 @@ class LiveViewMixin:
         expected_len = src_width * src_height
         if not src_bytes or src_width <= 0 or src_height <= 0 or len(src_bytes) < expected_len:
             return src_bytes
+        if np is not None:
+            source = np.frombuffer(src_bytes, dtype=np.uint8, count=expected_len).reshape(src_height, src_width)
+            return np.rot90(source, 1).tobytes()
         dst_width = src_height
         dst = bytearray(expected_len)
         for src_y in range(src_height):
@@ -679,8 +865,8 @@ class LiveViewMixin:
             oriented_mask = self._rotate_grayscale_clockwise(saturation_mask, src_width, src_height) if saturation_mask else None
             return oriented_bytes, src_height, src_width, oriented_mask
         if rotation == 180:
-            oriented_bytes = bytes(reversed(gray_bytes)) if gray_bytes else gray_bytes
-            oriented_mask = bytes(reversed(saturation_mask)) if saturation_mask else None
+            oriented_bytes = gray_bytes[::-1] if gray_bytes else gray_bytes
+            oriented_mask = saturation_mask[::-1] if saturation_mask else None
             return oriented_bytes, src_width, src_height, oriented_mask
         if rotation == 270:
             oriented_bytes = self._rotate_grayscale_counterclockwise(gray_bytes, src_width, src_height)
@@ -712,8 +898,11 @@ class LiveViewMixin:
     def _normalize_grayscale_for_display(self, gray_bytes):
         if not gray_bytes:
             return gray_bytes, 0, 0
-        min_value = min(gray_bytes)
-        max_value = max(gray_bytes)
+        if np is not None:
+            values = np.frombuffer(gray_bytes, dtype=np.uint8)
+            min_value, max_value = int(values.min()), int(values.max())
+        else:
+            min_value, max_value = min(gray_bytes), max(gray_bytes)
         if min_value == max_value:
             return gray_bytes, min_value, max_value
         scale = 255.0 / (max_value - min_value)
@@ -751,7 +940,62 @@ class LiveViewMixin:
             cached = self._gamma_lut_cache
         return gray_bytes.translate(cached[1])
 
-    def _prepare_live_display_bytes(self, gray_bytes):
+    def _live_raw_samples_for_roi(self, raw_frame, crop_roi):
+        pixels = raw_frame["pixels"]
+        height, width = pixels.shape
+        frame_w, frame_h = raw_frame["frame_width"], raw_frame["frame_height"]
+        roi = self._normalize_roi_tuple(crop_roi)
+        if not roi or self._live_frame_already_matches_roi(roi, frame_w, frame_h, width, height):
+            return pixels
+        x, y, w, h = roi
+        scale_x, scale_y = frame_w / width, frame_h / height
+        x0 = max(0, min(width - 1, int(x / scale_x)))
+        y0 = max(0, min(height - 1, int(y / scale_y)))
+        x1 = max(x0 + 1, min(width, int(math.ceil((x + w) / scale_x))))
+        y1 = max(y0 + 1, min(height, int(math.ceil((y + h) / scale_y))))
+        return pixels[y0:y1, x0:x1]
+
+    def _map_live_intensity_values(self, values, low, high, gamma):
+        mapped = np.asarray(values, dtype=np.float64).copy()
+        mapped -= low
+        mapped /= high - low
+        np.clip(mapped, 0.0, 1.0, out=mapped)
+        if abs(gamma - 1.0) >= 0.01:
+            np.power(mapped, 1.0 / gamma, out=mapped)
+        mapped *= 255.0
+        mapped += 0.5
+        np.floor(mapped, out=mapped)
+        return mapped.astype(np.uint8)
+
+    def _prepare_live_display_bytes(self, gray_bytes, raw_frame=None, crop_roi=None):
+        if np is not None and raw_frame is not None:
+            pixels = self._live_raw_samples_for_roi(raw_frame, crop_roi)
+            if pixels.size != len(gray_bytes):
+                raise ValueError("Live raw pixels do not match the displayed ROI.")
+            minimum, maximum = int(pixels.min()), int(pixels.max())
+            auto = bool(self.live_autocontrast_var.get())
+            gamma = self._get_live_display_gamma()
+            depth = self._live_effective_display_depth(raw_frame["bit_depth"], raw_frame["bits_per_pixel"],
+                                                       raw_frame["saturation_threshold"])
+            low, high = (minimum, maximum) if auto and maximum > minimum else (0, (1 << depth) - 1)
+            high = max(low + 1, high)
+            self.live_display_intensity_mapping = (minimum, maximum, low, high, auto, gamma)
+            if pixels.dtype.itemsize <= 2:
+                key = (pixels.dtype.itemsize, low, high, gamma)
+                cached = getattr(self, "_live_intensity_lut_cache", None)
+                if cached is None or cached[0] != key:
+                    # One small LUT preserves low-signal detail without a full-frame float copy.
+                    values = np.arange(1 << (8 * pixels.dtype.itemsize), dtype=np.float64)
+                    cached = (key, self._map_live_intensity_values(values, low, high, gamma))
+                    self._live_intensity_lut_cache = cached
+                return cached[1][pixels].tobytes()
+            result = bytearray(pixels.size)
+            for row in range(0, pixels.shape[0], 64):
+                block = self._map_live_intensity_values(pixels[row:row + 64], low, high, gamma)
+                start = row * pixels.shape[1]
+                result[start:start + block.size] = block.tobytes()
+            return bytes(result)
+        self.live_display_intensity_mapping = None
         if self.live_autocontrast_var.get():
             render_bytes, _, _ = self._normalize_grayscale_for_display(gray_bytes)
         else:
@@ -760,6 +1004,14 @@ class LiveViewMixin:
 
     def _grayscale_to_rgb_bytes(self, gray_bytes, src_width, src_height, dest_width, dest_height, saturation_mask=None):
         scaled = self._resample_grayscale_nearest(gray_bytes, src_width, src_height, dest_width, dest_height)
+        if np is not None:
+            values = np.frombuffer(scaled, dtype=np.uint8)
+            rgb = np.empty((values.size, 3), dtype=np.uint8)
+            rgb[:] = values[:, None]
+            if saturation_mask:
+                mask = self._resample_grayscale_nearest(saturation_mask, src_width, src_height, dest_width, dest_height)
+                rgb[np.frombuffer(mask, dtype=np.uint8) != 0] = (255, 0, 0)
+            return rgb.tobytes()
         n = len(scaled)
         gray_arr = array.array('B', scaled)
         rgb_arr = array.array('B', b'\x00' * (n * 3))
@@ -827,6 +1079,9 @@ class LiveViewMixin:
         with self.live_frame_lock:
             frame = self.latest_live_frame
             frame_info = self.live_frame_info
+            raw_frame = getattr(self, "latest_live_raw_frame", None)
+            if raw_frame is not None and raw_frame["frame"] is not frame:
+                raw_frame = None
         if not frame:
             messagebox.showinfo("Live Snapshot", "Start live view first, then take a snapshot.")
             return
@@ -844,19 +1099,11 @@ class LiveViewMixin:
             if frame_info and len(frame_info) >= 2:
                 frame_width, frame_height = int(frame_info[0]), int(frame_info[1])
             rx, ry, rw, rh = roi
-            gray_bytes, saturation_mask, src_width, src_height, _cx, _cy = self._crop_live_frame_bytes(
-                gray_bytes,
-                saturation_mask,
-                src_width,
-                src_height,
-                frame_width,
-                frame_height,
-                rx,
-                ry,
-                rw,
-                rh,
-            )
-        render_bytes = self._prepare_live_display_bytes(gray_bytes)
+            if not self._live_frame_already_matches_roi(roi, frame_width, frame_height, src_width, src_height):
+                gray_bytes, saturation_mask, src_width, src_height, _cx, _cy = self._crop_live_frame_bytes(
+                    gray_bytes, saturation_mask, src_width, src_height, frame_width, frame_height, rx, ry, rw, rh
+                )
+        render_bytes = self._prepare_live_display_bytes(gray_bytes, raw_frame, roi)
         render_mask = saturation_mask if self.live_show_saturation_var.get() else None
         render_bytes, display_width, display_height, render_mask = self._orient_live_display_bytes(
             render_bytes,
@@ -1022,6 +1269,11 @@ class LiveViewMixin:
             image_x, image_y = self.live_cursor_image_xy[0], self.live_cursor_image_xy[1]
         else:
             image_x, image_y = full_w // 2, full_h // 2
+        crop_roi = self._normalize_roi_tuple(self.live_view_crop_roi)
+        if crop_roi and abs(full_w - crop_roi[2]) <= 2 and abs(full_h - crop_roi[3]) <= 2 and \
+                (self.live_cross_point or self.live_cursor_image_xy):
+            image_x -= crop_roi[0]
+            image_y -= crop_roi[1]
         px = max(0, min(prof_w - 1, int(image_x * prof_w / full_w)))
         py = max(0, min(prof_h - 1, int(image_y * prof_h / full_h)))
         row_values = gray_bytes[py * prof_w:(py + 1) * prof_w]
@@ -1092,6 +1344,9 @@ class LiveViewMixin:
         with self.live_frame_lock:
             frame = self.latest_live_frame
             frame_info = self.live_frame_info
+            raw_frame = getattr(self, "latest_live_raw_frame", None)
+            if raw_frame is not None and raw_frame["frame"] is not frame:
+                raw_frame = None
         full_frame_info = frame_info
         if not frame:
             with self.live_frame_lock:
@@ -1120,7 +1375,7 @@ class LiveViewMixin:
                     frame_info = (src_width, src_height, bit_depth, bits_per_pixel)
             else:
                 self._live_crop_offset = (0, 0)
-            render_bytes = self._prepare_live_display_bytes(gray_bytes)
+            render_bytes = self._prepare_live_display_bytes(gray_bytes, raw_frame, crop_roi)
             render_mask = saturation_mask if self.live_show_saturation_var.get() else None
             display_bytes, display_src_width, display_src_height, display_mask = self._orient_live_display_bytes(
                 render_bytes,
@@ -1134,13 +1389,16 @@ class LiveViewMixin:
             base_w, base_h = self._fit_dimensions(display_src_width, display_src_height, max(width - 16, 1), max(height - 16, 1))
             target_w = max(1, int(round(base_w * self.live_zoom_factor)))
             target_h = max(1, int(round(base_h * self.live_zoom_factor)))
-            self.live_photo, out_w, out_h = self._make_ppm_photo_from_grayscale(
-                display_bytes,
-                display_src_width,
-                display_src_height,
-                target_w,
-                target_h,
-                display_mask,
+            if getattr(self, "live_native_pixel_view", False):
+                target_w, target_h = display_src_width, display_src_height
+                self.live_zoom_factor = display_src_width / base_w
+                self._update_live_zoom_label()
+            out_w, out_h = self._fit_dimensions(display_src_width, display_src_height, target_w, target_h)
+            self._clamp_live_pan(width, height, out_w, out_h)
+            left = (width - out_w) / 2 + self.live_pan_x
+            top = (height - out_h) / 2 + self.live_pan_y
+            self.live_photo, photo_left, photo_top = self._make_live_viewport_photo(
+                display_bytes, display_mask, display_src_width, display_src_height, out_w, out_h, width, height, left, top
             )
         except tk.TclError as exc:
             with self.live_frame_lock:
@@ -1155,9 +1413,6 @@ class LiveViewMixin:
         canvas = self.live_view_canvas
         canvas.delete("all")
         canvas.create_rectangle(0, 0, width, height, fill=self.theme["canvas"], outline="")
-        self._clamp_live_pan(width, height, out_w, out_h)
-        left = (width - out_w) / 2 + self.live_pan_x
-        top = (height - out_h) / 2 + self.live_pan_y
         if frame_info:
             frame_width, frame_height, bit_depth, bits_per_pixel = self._live_frame_info_parts(frame_info)
         else:
@@ -1175,13 +1430,19 @@ class LiveViewMixin:
             self._maybe_initialize_roi_fields_from_live_frame(full_frame_info[0], full_frame_info[1])
         else:
             self._maybe_initialize_roi_fields_from_live_frame(frame_width, frame_height)
-        canvas.create_image(left + out_w / 2, top + out_h / 2, image=self.live_photo, anchor="center")
+        canvas.create_image(photo_left, photo_top, image=self.live_photo, anchor="nw")
         self._draw_live_roi_overlay(canvas)
         self._draw_live_cross_overlay(canvas)
         self._render_live_profiles()
         if not self.live_first_frame_rendered:
             self.live_first_frame_rendered = True
-            self._set_live_view_status(f"Live view: displaying {self.live_pixel_format_name}")
+            mode_text = getattr(self, "latest_live_mode_text", "unknown")
+            self._set_live_view_status(f"Live view: displaying {self.live_pixel_format_name}, {mode_text}")
+            if raw_frame is not None:
+                minimum, maximum, low, high, auto, gamma = self.live_display_intensity_mapping
+                self.log(f"Live preview intensity mapping: raw range={minimum}..{maximum}, "
+                         f"display range={low}..{high}, Auto={auto}, gamma={gamma:g}; "
+                         "Auto/Gamma applied before 8-bit conversion.", detail=True)
             self.log("Live preview rendered successfully on the canvas.", detail=True)
         with self.live_frame_lock:
             self.last_live_render_time = time.time()

@@ -674,10 +674,28 @@ class UIBuilderMixin:
                  highlightthickness=0).pack(side="left")
         tk.Button(live_display_bar, text="Reset", command=self.reset_live_gamma, font=compact_font, padx=3, pady=0).pack(side="left", padx=(2, 0))
         tk.Button(live_display_bar, text="Snap", command=self.snapshot_live_view, font=compact_font, padx=3, pady=0).pack(side="left", padx=(2, 0))
-        tk.Label(live_display_bar, textvariable=self.live_zoom_label_var, fg="#9aa6b2", bg=self.theme["panel"], font=compact_font).pack(side="left", padx=(4, 2))
-        tk.Button(live_display_bar, text="-", width=2, command=lambda: self.zoom_live_view(1 / 1.25)).pack(side="left")
-        tk.Button(live_display_bar, text="Fit", command=self.fit_live_view, font=compact_font, padx=3, pady=0).pack(side="left", padx=(2, 0))
-        tk.Button(live_display_bar, text="+", width=2, command=lambda: self.zoom_live_view(1.25)).pack(side="left", padx=(2, 0))
+        live_zoom_controls = tk.Frame(live_controls, bg=self.theme["panel"])
+        live_zoom_controls.pack(in_=live_display_bar, side="left")
+        tk.Label(live_zoom_controls, textvariable=self.live_zoom_label_var, fg="#9aa6b2", bg=self.theme["panel"], font=compact_font).pack(side="left", padx=(4, 2))
+        tk.Button(live_zoom_controls, text="-", width=2, command=lambda: self.zoom_live_view(1 / 1.25)).pack(side="left")
+        tk.Button(live_zoom_controls, text="Fit", command=self.fit_live_view, font=compact_font, padx=3, pady=0).pack(side="left", padx=(2, 0))
+        tk.Button(live_zoom_controls, text="1:1", command=self.show_live_native_resolution, font=compact_font, padx=3, pady=0).pack(side="left", padx=(2, 0))
+        tk.Button(live_zoom_controls, text="+", width=2, command=lambda: self.zoom_live_view(1.25)).pack(side="left", padx=(2, 0))
+
+        def arrange_live_zoom_controls(_event=None):
+            inline = str(live_zoom_controls.pack_info()["in"]) == str(live_display_bar)
+            zoom_width = live_zoom_controls.winfo_reqwidth()
+            required = live_display_bar.winfo_reqwidth() + (0 if inline else zoom_width)
+            should_inline = required <= live_controls.winfo_width()
+            if should_inline != inline:
+                live_zoom_controls.pack_forget()
+                if should_inline:
+                    live_zoom_controls.pack(in_=live_display_bar, side="left")
+                else:
+                    live_zoom_controls.pack(side="top", anchor="e", pady=(2, 0))
+
+        live_controls.bind("<Configure>", arrange_live_zoom_controls)
+        live_zoom_controls.bind("<Configure>", arrange_live_zoom_controls)
         live_profile_grid = tk.Frame(live_tab, bg=self.theme["panel"])
         live_profile_grid.pack(fill="both", expand=True)
         live_profile_grid.grid_rowconfigure(0, weight=1)
@@ -1238,6 +1256,7 @@ class UIBuilderMixin:
         tk.Label(live_zoom_bar, textvariable=self.live_zoom_label_var, fg="#9aa6b2", bg=self.theme["panel"]).pack(side="left", padx=(12, 4))
         tk.Button(live_zoom_bar, text="-", width=3, command=lambda: self.zoom_live_view(1 / 1.25)).pack(side="left")
         tk.Button(live_zoom_bar, text="Fit to view", command=self.fit_live_view).pack(side="left", padx=(6, 0))
+        tk.Button(live_zoom_bar, text="1:1", command=self.show_live_native_resolution).pack(side="left", padx=(6, 0))
         tk.Button(live_zoom_bar, text="+", width=3, command=lambda: self.zoom_live_view(1.25)).pack(side="left", padx=(6, 0))
         tk.Label(live_zoom_bar, text="Mouse wheel zoom; right-drag pan", fg="#728091", bg=self.theme["panel"]).pack(side="left", padx=(10, 0))
 
