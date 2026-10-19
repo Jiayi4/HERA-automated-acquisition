@@ -10,6 +10,13 @@ import uuid
 
 from hera_app.controllers import HeraController
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+EXPORT_CHUNK_BYTES = 8 * 1024 * 1024
+
 
 def emit(event, **payload):
     message = {"event": event, **payload}
@@ -430,6 +437,25 @@ def read_file_backed_band(flat_info, band_index):
     return values
 
 
+def iter_file_roi_chunks(source_file, band_index, width, height, data_type, roi, chunk_rows):
+    x, y, roi_w, roi_h = roi
+    bytes_value = bytes_per_value(data_type)
+    row_bytes = width * bytes_value
+    selected_row_bytes = roi_w * bytes_value
+    band_offset = band_index * row_bytes * height
+    for offset in range(0, roi_h, chunk_rows):
+        rows = min(chunk_rows, roi_h - offset)
+        source_file.seek(band_offset + (y + offset) * row_bytes + x * bytes_value)
+        span_bytes = (rows - 1) * row_bytes + selected_row_bytes
+        raw = source_file.read(span_bytes)
+        if len(raw) != span_bytes:
+            raise RuntimeError("File-backed flatfield band is incomplete.")
+        if selected_row_bytes != row_bytes and rows > 1:
+            view = memoryview(raw)
+            raw = b"".join(view[row * row_bytes:row * row_bytes + selected_row_bytes] for row in range(rows))
+        yield offset, rows, raw
+
+
 def write_sdk_hypercube_envi(
     controller,
     hypercube_handle,
@@ -489,16 +515,18 @@ def write_file_backed_hypercube_envi(flat_info, output_base_path, description, r
     wavelengths = flat_info.get("wavelengths") or []
     bytes_value = bytes_per_value(data_type)
     source_row_bytes = source_width * bytes_value
-    source_band_bytes = source_width * source_height * bytes_value
-    row_bytes = roi_w * bytes_value
+    chunk_rows = max(1, min(roi_h, EXPORT_CHUNK_BYTES // source_row_bytes))
     final_raw_replaced = False
     try:
         with open(flat_info["file_path"], "rb") as source_file, open(temp_raw_path, "wb") as raw_file:
+            if os.fstat(source_file.fileno()).st_size < source_width * source_height * bands * bytes_value:
+                raise RuntimeError("File-backed flatfield band is incomplete.")
             for band_index in range(bands):
-                band_offset = band_index * source_band_bytes
-                for row in range(roi_y, roi_y + roi_h):
-                    source_file.seek(band_offset + row * source_row_bytes + roi_x * bytes_value)
-                    raw_file.write(source_file.read(row_bytes))
+                for _offset, _rows, raw in iter_file_roi_chunks(
+                    source_file, band_index, source_width, source_height, data_type,
+                    (roi_x, roi_y, roi_w, roi_h), chunk_rows,
+                ):
+                    raw_file.write(raw)
                 if band_index == 0 or (band_index + 1) % 25 == 0 or band_index + 1 == bands:
                     pct = int(round((band_index + 1) * 100 / bands))
                     emit_func("progress", phase="direct_saving", product=progress_product, percent=pct)
@@ -538,37 +566,78 @@ def write_normalized_envi(
     source_width = int(alignment["sample_source_width"])
     source_height = int(alignment["sample_source_height"])
     flat_source_width = int(alignment["flatfield_source_width"])
+    flat_source_height = int(flat_info["source_height"])
+    flat_type = int(flat_info["data_type"])
     roi_x, roi_y, roi_w, roi_h = alignment["sample_roi"]
     flat_roi_x, flat_roi_y, _flat_roi_w, _flat_roi_h = alignment["flatfield_roi"]
     sample_byte_count = source_width * source_height * bytes_per_value(cube_type)
     sample_typecode = array_typecode(cube_type)
+    chunk_rows = max(1, min(roi_h, EXPORT_CHUNK_BYTES // max(
+        flat_source_width * bytes_per_value(flat_type), roi_w * 40,
+    )))
     wavelengths = []
     final_raw_replaced = False
     try:
-        with open(temp_raw_path, "wb") as raw_file:
+        if np is not None:
+            work_shape = (chunk_rows, roi_w)
+            sample_work = np.empty(work_shape, dtype=np.float64)
+            flat_work = np.empty(work_shape, dtype=np.float64)
+            normalized_work = np.empty(work_shape, dtype=np.float64)
+            output_work = np.empty(work_shape, dtype="<f4")
+            valid_work = np.empty(work_shape, dtype=np.bool_)
+        emit_func("log", message=(
+            f"Helper normalized export: {'NumPy float64 division -> float32 BSQ' if np is not None else 'Python compatibility path'}; "
+            f"block_rows={chunk_rows}, reference opened once per export."
+        ))
+        with open(flat_info["file_path"], "rb") as flat_file, open(temp_raw_path, "wb") as raw_file:
+            if os.fstat(flat_file.fileno()).st_size < flat_source_width * flat_source_height * int(bands) * bytes_per_value(flat_type):
+                raise RuntimeError("File-backed flatfield band is incomplete.")
             for band_index in range(int(bands)):
                 wavelength, sample_pointer = controller.get_hypercube_band_pointer(
                     hypercube_handle,
                     band_index,
                     int(cube_type),
                 )
-                sample_values = array.array(sample_typecode)
-                sample_values.frombytes(
-                    ctypes.string_at(ctypes.addressof(sample_pointer.contents), sample_byte_count)
-                )
-                flat_values = read_file_backed_band(flat_info, band_index)
+                if np is not None:
+                    sample_view = np.ctypeslib.as_array(sample_pointer, shape=(source_width * source_height,)).reshape(
+                        source_height, source_width
+                    )
+                else:
+                    sample_values = array.array(sample_typecode)
+                    sample_values.frombytes(ctypes.string_at(ctypes.addressof(sample_pointer.contents), sample_byte_count))
 
-                for sample_row, flat_row in zip(range(roi_y, roi_y + roi_h), range(flat_roi_y, flat_roi_y + roi_h)):
-                    sample_start = sample_row * source_width + roi_x
-                    flat_start = flat_row * flat_source_width + flat_roi_x
+                for row_offset, rows, flat_raw in iter_file_roi_chunks(
+                    flat_file, band_index, flat_source_width, flat_source_height, flat_type,
+                    (flat_roi_x, flat_roi_y, roi_w, roi_h), chunk_rows,
+                ):
+                    if np is not None:
+                        # Match Python float division before the existing float32 export conversion.
+                        sample_block, flat_block = sample_work[:rows], flat_work[:rows]
+                        normalized, output, valid = normalized_work[:rows], output_work[:rows], valid_work[:rows]
+                        flat_view = np.frombuffer(flat_raw, dtype="<f4" if flat_type == 0 else "<f8").reshape(rows, roi_w)
+                        with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
+                            np.copyto(sample_block, sample_view[roi_y + row_offset:roi_y + row_offset + rows, roi_x:roi_x + roi_w])
+                            np.copyto(flat_block, flat_view)
+                            np.abs(flat_block, out=normalized)
+                            np.greater(normalized, 1e-12, out=valid)
+                            normalized.fill(0.0)
+                            np.divide(sample_block, flat_block, out=normalized, where=valid)
+                            np.copyto(output, normalized, casting="unsafe")
+                        raw_file.write(output.tobytes())
+                    else:
+                        flat_values = array.array(array_typecode(flat_type))
+                        flat_values.frombytes(flat_raw)
+                        for row in range(rows):
+                            sample_start = (roi_y + row_offset + row) * source_width + roi_x
+                            flat_start = row * roi_w
 
-                    def normalized_row():
-                        for offset in range(roi_w):
-                            sample = float(sample_values[sample_start + offset])
-                            flat = float(flat_values[flat_start + offset])
-                            yield sample / flat if abs(flat) > 1e-12 else 0.0
+                            def normalized_row():
+                                for offset in range(roi_w):
+                                    sample = float(sample_values[sample_start + offset])
+                                    flat = float(flat_values[flat_start + offset])
+                                    yield sample / flat if abs(flat) > 1e-12 else 0.0
 
-                    array.array("f", normalized_row()).tofile(raw_file)
+                            array.array("f", normalized_row()).tofile(raw_file)
 
                 wavelengths.append(float(wavelength))
                 if band_index == 0 or (band_index + 1) % 10 == 0 or band_index + 1 == int(bands):
